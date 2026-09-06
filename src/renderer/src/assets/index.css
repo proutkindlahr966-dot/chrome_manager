@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: 244 247 248;
+  --surface-raised: 255 255 255;
+  --surface-overlay: 255 255 255;
+  --surface-muted: 232 238 240;
+  --ink: 15 28 36;
+  --ink-soft: 51 65 85;
+  --ink-muted: 100 116 139;
+  --line: 215 224 229;
+  --accent: 15 118 110;
+  --accent-soft: 204 251 241;
+  --accent-strong: 17 94 89;
+  --success: 21 128 61;
+  --warning: 180 83 9;
+  --danger: 185 28 28;
+  color-scheme: light;
+}
+
+.dark {
+  --surface: 11 18 32;
+  --surface-raised: 18 26 43;
+  --surface-overlay: 23 32 51;
+  --surface-muted: 27 37 56;
+  --ink: 232 238 247;
+  --ink-soft: 199 210 224;
+  --ink-muted: 139 155 179;
+  --line: 36 48 73;
+  --accent: 45 212 191;
+  --accent-soft: 13 51 48;
+  --accent-strong: 94 234 212;
+  --success: 74 222 128;
+  --warning: 251 191 36;
+  --danger: 248 113 113;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  background:
+    radial-gradient(1200px 500px at 0% -10%, rgba(15, 118, 110, 0.12), transparent 55%),
+    radial-gradient(900px 400px at 100% 0%, rgba(3, 105, 161, 0.08), transparent 50%),
+    rgb(var(--surface));
+  color: rgb(var(--ink));
+  -webkit-font-smoothing: antialiased;
+}
+
+.dark body {
+  background:
+    radial-gradient(1000px 480px at 0% -10%, rgba(45, 212, 191, 0.08), transparent 55%),
+    radial-gradient(800px 360px at 100% 0%, rgba(56, 189, 248, 0.06), transparent 50%),
+    rgb(var(--surface));
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-muted) / 0.45);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+
+  .btn-icon {
+    @apply px-2 py-1.5;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent-strong dark:text-slate-950;
+  }
+
+  .btn-secondary {
+    @apply btn border border-line bg-surface-raised text-ink hover:bg-surface-muted;
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-soft hover:bg-surface-muted;
+  }
+
+  .btn-danger {
+    @apply btn bg-danger/10 text-danger hover:bg-danger/20;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface-raised px-3 py-2 text-sm text-ink
+      placeholder:text-ink-muted outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-muted;
+  }
+
+  .panel {
+    @apply rounded-xl border border-line bg-surface-raised shadow-panel;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

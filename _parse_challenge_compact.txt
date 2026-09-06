@@ -1,0 +1,116 @@
+001|================================================================================
+002|GOOGLE CHALLENGE HTML PARSE
+003|================================================================================
+004|Selected line index: 32
+005|Selected role: user
+006|HTML length: 1085372
+007|Has doctype: True
+008|Has data-challengetype: True
+009|
+010|--- 1) MARKER COUNTS ---
+011|  iframe: 0
+012|  frame: 0
+013|  shadowroot: 0
+014|  attachShadow: 0
+015|  closed_shadow_markers: 0
+016|
+017|--- 2) FULL jsaction ON c-wiz CONTAINING CuPSye ---
+018|  hit[0]:
+019|    note: CuPSye found but no preceding c-wiz
+020|    cupsy_offset: 925230
+021|    context: rer="xP8nce" class="A77ntc" jsshadow jsdata="deferred-i6" data-p="%.@.null,2]" jscontroller="s0Ukzf" jsaction="jiqeKb:ZCwQbe;CDQ11b:n4vmRb;DKwHie:gVmDzc;jR85Td:WtmXg;rcuQ6b:rcuQ6b;o07HZc:V4xqVe;click:CuPSye(...[trunc]
+022|
+023|--- 3) SCRIPT/HTML SNIPPETS (CuPSye / selectchallenge / challengetype 6) first 5, 200 chars ---
+024|  [0] source=html match=CuPSye
+025|      WtmXg;rcuQ6b:rcuQ6b;o07HZc:V4xqVe;click:CuPSye(EBHGs),p3cQ3e(PvB1Bd),p6l3Gf(ZPoTod);" jsname="nUpftc" data-node-index="0;0" jsmodel="hc6Ubd" view c-wiz><main class="Svhjgc" jsname="bN97Pc" jscontrolle
+026|  [1] source=html match=selectchallenge
+027|      ="EBHGs" data-challengeid=3 data-action=selectchallenge data-challengeunavailable="true" data-accountrecovery="false" data-challengetype="39"><div class="Z1r7P" jsname="Bz112c" aria-hidden="true"><svg
+028|  [2] source=html match=selectchallenge
+029|      ="EBHGs" data-challengeid=2 data-action=selectchallenge data-accountrecovery="false" data-challengetype="6"><div class="Z1r7P" jsname="Bz112c" aria-hidden="true"><svg aria-hidden="true" class="Qk3oof"
+030|  [3] source=html match=data-challengetype="6
+031|      tchallenge data-accountrecovery="false" data-challengetype="6"><div class="Z1r7P" jsname="Bz112c" aria-hidden="true"><svg aria-hidden="true" class="Qk3oof" fill="currentColor" focusable="false" width=
+032|
+033|--- 4) OPTIONS INSIDE IFRAME? ---
+034|  options_appear_inside_iframe: False
+035|  data_challengeid_outside_iframe: True
+036|  iframe_count_checked: 0
+037|  iframe_details:
+038|
+039|--- 5) data-challengeid=2 ELEMENT + PARENT CHAIN (up 8) ---
+040|  regex_hit_count: 1
+041|  regex_element[0]: <div class="VV3oRb YZVTmd SmR8" role="link" tabindex="0" jsname="EBHGs" data-challengeid=2 data-action=selectchallenge data-accountrecovery="false" data-challengetype="6">
+042|  parser_hit[0]:
+043|    full_element: <div class="VV3oRb YZVTmd SmR8" role="link" tabindex="0" jsname="EBHGs" data-challengeid="2" data-action="selectchallenge" data-accountrecovery="false" data-challengetype="6">
+044|    parent_chain_nearest_first (up to 8): ['li', 'ul', 'div', 'div', 'div', 'section', 'div', 'div']
+045|    parent_chain_rootward_8: ['div', 'div', 'section', 'div', 'div', 'div', 'ul', 'li']
+046|    depth: 24
+047|
+048|--- 6) TABINDEX / NAVIGATION HINTS ---
+049|  tabindex count: 90
+050|  tabindex[0]: -1 | <style data-href="https://www.gstatic.com/_/mss/boq-identity/_/ss/k=boq-identity.AccountsSignInUi.pyY6Izshk4s.L.B1.O/am=IYIACDCOeCMHwP__vwEABBBsB3xfC6AJEDIAAAAAAAAAAIAVAABsCCAC/d=1/ed=1/rs=AOaEmlEafbm...[trunc]
+051|  tabindex[1]: 0 | <div jscontroller="k5xHfe" jsaction="click:cOuCgd;blur:O22p3e;mousedown:UX7yZ;mouseup:lbsD7e;touchstart:p6p2H;touchend:yfqBxc" class="Ahygpe m8wwGd EPPJc cd29Sd xNLKcb" tabindex="0" role="link" aria-la...[trunc]
+052|  tabindex[2]: 0 | <div class="VV3oRb YZVTmd SmR8 RDPZE" role="link" tabindex="0" aria-disabled="true" jsname="EBHGs" data-challengeid=3 data-action=selectchallenge data-challengeunavailable="true" data-accountrecovery="...[trunc]
+053|  tabindex[3]: 0 | <div class="VV3oRb YZVTmd SmR8" role="link" tabindex="0" jsname="EBHGs" data-challengeid=2 data-action=selectchallenge data-accountrecovery="false" data-challengetype="6">
+054|  tabindex[4]: 0 | <div class="VV3oRb YZVTmd SmR8" role="link" tabindex="0" jsname="ZPoTod" data-action=accountrecovery data-accountrecovery="true" data-challengetype="39">
+055|  tabindex[5]: 0 | <div class="VfPpkd-TkwUic" jsname="oYxtQd" jsaction="focus:AHmuwe; blur:O22p3e; click:cOuCgd; keydown:I481le; mousedown:UX7yZ; mouseup:lbsD7e; mouseenter:tfO1Yc; mouseleave:JywGue; touchstart:p6p2H; to...[trunc]
+056|  tabindex[6]: -1 | <ul class="VfPpkd-rymPhb r6B9Fd bwNLcf P2Hi5d VfPpkd-OJnkse" jsname="rymPhb" jscontroller="PHUIyb" jsaction="mouseleave:JywGue; touchcancel:JMtRjd; focus:AHmuwe; blur:O22p3e; keydown:I481le;" role="li...[trunc]
+057|  tabindex[7]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedown...[trunc]
+058|  tabindex[8]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedown...[trunc]
+059|  tabindex[9]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedown...[trunc]
+060|  tabindex[10]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+061|  tabindex[11]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+062|  tabindex[12]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+063|  tabindex[13]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+064|  tabindex[14]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+065|  tabindex[15]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+066|  tabindex[16]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+067|  tabindex[17]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-gk6SMd VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; ...[trunc]
+068|  tabindex[18]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+069|  tabindex[19]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+070|  tabindex[20]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+071|  tabindex[21]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+072|  tabindex[22]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+073|  tabindex[23]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+074|  tabindex[24]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+075|  tabindex[25]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+076|  tabindex[26]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+077|  tabindex[27]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+078|  tabindex[28]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+079|  tabindex[29]: -1 | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mousedow...[trunc]
+080|  other nav hint count: 85
+081|  nav[0]: role="listbox" | <span id="i5" style="display: none" aria-hidden="true" role="listbox">
+082|  nav[1]: role="listbox" | <ul class="VfPpkd-rymPhb r6B9Fd bwNLcf P2Hi5d VfPpkd-OJnkse" jsname="rymPhb" jscontroller="PHUIyb" jsaction="mouseleave:JywGue; touchcancel:JMtRjd; focus:AHmuwe; blur:O22p3e; keydown:I481le;" r...[trunc]
+083|  nav[2]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+084|  nav[3]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+085|  nav[4]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+086|  nav[5]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+087|  nav[6]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+088|  nav[7]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+089|  nav[8]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+090|  nav[9]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mou...[trunc]
+091|  nav[10]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+092|  nav[11]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+093|  nav[12]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-gk6SMd VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:R...[trunc]
+094|  nav[13]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+095|  nav[14]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+096|  nav[15]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+097|  nav[16]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+098|  nav[17]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+099|  nav[18]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+100|  nav[19]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+101|  nav[20]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+102|  nav[21]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+103|  nav[22]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+104|  nav[23]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+105|  nav[24]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+106|  nav[25]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+107|  nav[26]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+108|  nav[27]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+109|  nav[28]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+110|  nav[29]: role="option" | <li class="MCs1Pd HiC7Nc VfPpkd-OkbHre VfPpkd-aJasdd-RWgCYc-wQNmvb VfPpkd-rymPhb-ibnC6b VfPpkd-rymPhb-ibnC6b-OWXEXe-SfQLQb-Woal0c-RWgCYc" jsaction=" keydown:RDtNu; keyup:JdS61c; click:o6ZaF; mo...[trunc]
+111|
+112|--- 7) challengeId / HIDDEN INPUTS ---
+113|  hits: 1
+114|  [0] <input type="hidden" name="challengeListId" value="2" jscontroller="YgOFye">
+115|
+116|DONE
