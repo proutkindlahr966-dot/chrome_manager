@@ -1,5 +1,7 @@
+import { AsyncLocalStorage } from 'async_hooks'
 import { appendFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
+import { BrowserWindow } from 'electron'
 import type { Browser, Frame, Page, ElementHandle, Target } from 'puppeteer-core'
 import { getDb } from '../db/database'
 import {
@@ -9,14 +11,24 @@ import {
   normalizeGmail,
   resolveTotpSecret
 } from '../../shared/gmail'
+import { IPC } from '../../shared/ipc'
 import type {
   BulkResult,
   GmailCredentials,
   GmailLoginOptions,
+  GmailLoginProgress,
   GmailLoginResult
 } from '../../shared/types'
 import { applyWindowBounds, getDebugPort, launchProfile } from './chrome.service'
 import { getDataRoot } from '../utils/paths'
+
+interface LoginLogContext {
+  profileId: string
+  profileName: string
+  email: string
+}
+
+const loginLogContext = new AsyncLocalStorage<LoginLogContext>()
 
 const GMAIL_URL = 'https://mail.google.com/mail/u/0/#inbox'
 const LOGIN_URL =
@@ -63,14 +75,37 @@ class SkipLoginError extends Error {
 
 function loginDebugLog(message: string, extra?: unknown): void {
   try {
+    const ctx = loginLogContext.getStore()
+    const tag = ctx ? `[${ctx.profileName}|${ctx.email}] ` : ''
     const dir = getDataRoot()
     mkdirSync(dir, { recursive: true })
     const line =
-      `[${new Date().toISOString()}] ${message}` +
+      `[${new Date().toISOString()}] ${tag}${message}` +
       (extra === undefined ? '' : ` ${typeof extra === 'string' ? extra : JSON.stringify(extra)}`)
     appendFileSync(join(dir, 'gmail-login-debug.log'), line + '\n', 'utf8')
   } catch {
     // ignore
+  }
+}
+
+/** Đẩy bước hiện tại lên nhật ký UI (an toàn khi nhiều luồng song song) */
+function emitLoginProgress(
+  step: string,
+  tone: GmailLoginProgress['tone'] = 'info'
+): void {
+  const ctx = loginLogContext.getStore()
+  if (!ctx) return
+  loginDebugLog(`bước: ${step}`)
+  const payload: GmailLoginProgress = {
+    profileId: ctx.profileId,
+    profileName: ctx.profileName,
+    email: ctx.email,
+    step,
+    tone,
+    at: new Date().toISOString()
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(IPC.GMAIL_LOGIN_PROGRESS, payload)
   }
 }
 
@@ -91,6 +126,49 @@ async function generateTotp(secret: string): Promise<string> {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms))
+}
+
+/** Số ngẫu nhiên trong [min, max] — dùng để nhập giống người */
+function rand(min: number, max: number): number {
+  return Math.floor(min + Math.random() * (max - min + 1))
+}
+
+async function humanDelay(minMs: number, maxMs: number): Promise<void> {
+  await delay(rand(minMs, maxMs))
+}
+
+/**
+ * Gõ từng ký tự với tốc độ biến thiên (giống tay người).
+ * Tránh gõ đều 75ms — Google dễ nhận pattern bot.
+ */
+async function typeLikeHuman(page: Page, value: string): Promise<void> {
+  for (let i = 0; i < value.length; i++) {
+    await page.keyboard.type(value[i], { delay: 0 })
+    // Chậm hơn ở đầu / giữa chuỗi; thỉnh thoảng nghỉ dài hơn
+    if (i > 0 && i % rand(4, 7) === 0) {
+      await humanDelay(220, 480)
+    } else {
+      await humanDelay(95, 210)
+    }
+  }
+}
+
+/** Di chuyển chuột rồi click vào ô (trusted pointer events) */
+async function humanClickHandle(page: Page, handle: ElementHandle<Element>): Promise<void> {
+  await handle.evaluate((el) => {
+    ;(el as HTMLElement).scrollIntoView({ block: 'center', inline: 'nearest' })
+  })
+  await humanDelay(120, 280)
+  const box = await handle.boundingBox()
+  if (box && box.width >= 4 && box.height >= 4) {
+    const x = box.x + box.width * (0.35 + Math.random() * 0.3)
+    const y = box.y + box.height * (0.4 + Math.random() * 0.25)
+    await page.mouse.move(x, y, { steps: rand(8, 16) })
+    await humanDelay(60, 160)
+    await page.mouse.click(x, y, { delay: rand(40, 90) })
+    return
+  }
+  await handle.click({ delay: rand(40, 90) })
 }
 
 /** Gắn nhãn tab/cửa sổ để phân biệt khi chạy nhiều Chrome */
@@ -210,7 +288,55 @@ async function findVisible(
 }
 
 async function pageText(page: Page): Promise<string> {
-  return page.evaluate(() => document.body?.innerText?.toLowerCase() ?? '')
+  try {
+    return await page.evaluate(() => document.body?.innerText?.toLowerCase() ?? '')
+  } catch (error) {
+    // Đang chuyển trang (sau 2FA → Sign in faster / inbox) — không coi là lỗi login
+    if (isDestroyedContextError(error)) return ''
+    throw error
+  }
+}
+
+/** Lỗi Puppeteer khi trang đang navigate — thường gặp sau 2FA thành công */
+function isDestroyedContextError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  return (
+    msg.includes('execution context was destroyed') ||
+    msg.includes('most likely because of a navigation') ||
+    msg.includes('detached frame') ||
+    msg.includes('frame was detached') ||
+    msg.includes('target closed') ||
+    msg.includes('session closed') ||
+    msg.includes('cannot find context')
+  )
+}
+
+/** Màn sau login thành công: Sign in faster (passkey), speedbump, continue… */
+function isPostAuthOptionalUrl(url: string): boolean {
+  const u = url.toLowerCase()
+  return (
+    u.includes('passkey') ||
+    u.includes('passkeyenrollment') ||
+    u.includes('speedbump') ||
+    u.includes('signin/continue') ||
+    u.includes('myaccount.google.com') ||
+    u.includes('accountoptions') ||
+    u.includes('/interstitials/')
+  )
+}
+
+function isSignInFasterText(text: string): boolean {
+  const t = text.toLowerCase()
+  return (
+    t.includes('sign in faster') ||
+    t.includes('đăng nhập nhanh hơn') ||
+    t.includes('passkey') ||
+    t.includes('khóa truy cập') ||
+    t.includes('create a passkey') ||
+    t.includes('tạo khóa') ||
+    t.includes('use your screen lock') ||
+    t.includes('skippable')
+  )
 }
 
 function isRobotChallenge(text: string): boolean {
@@ -305,41 +431,52 @@ function isIncorrectTotpError(text: string): boolean {
 
 /** Chỉ lấy text từ vùng báo lỗi Google (alert / aria-live / class lỗi Material) */
 async function readTotpErrorText(page: Page): Promise<string> {
-  return page.evaluate(() => {
-    const sels = [
-      '[role="alert"]',
-      '[aria-live="assertive"]',
-      '[aria-live="polite"]',
-      '.Ekjuhf',
-      '.o6cuMc',
-      '.dEOOab',
-      '.LXRPh',
-      '.ly3Yne',
-      '[jsname="B34EJ"]',
-      '[jsname="h9d3hd"]'
-    ]
-    const parts: string[] = []
-    for (const sel of sels) {
-      for (const el of Array.from(document.querySelectorAll(sel))) {
-        const t = ((el as HTMLElement).innerText || '').trim()
-        if (t) parts.push(t)
+  try {
+    return await page.evaluate(() => {
+      const sels = [
+        '[role="alert"]',
+        '[aria-live="assertive"]',
+        '[aria-live="polite"]',
+        '.Ekjuhf',
+        '.o6cuMc',
+        '.dEOOab',
+        '.LXRPh',
+        '.ly3Yne',
+        '[jsname="B34EJ"]',
+        '[jsname="h9d3hd"]'
+      ]
+      const parts: string[] = []
+      for (const sel of sels) {
+        for (const el of Array.from(document.querySelectorAll(sel))) {
+          const t = ((el as HTMLElement).innerText || '').trim()
+          if (t) parts.push(t)
+        }
       }
-    }
-    return parts.join('\n').toLowerCase()
-  })
+      return parts.join('\n').toLowerCase()
+    })
+  } catch (error) {
+    // Navigate sau Next 2FA → Sign in faster — không phải mã sai
+    if (isDestroyedContextError(error)) return ''
+    throw error
+  }
 }
 
 async function pageShowsTotpRejected(page: Page): Promise<boolean> {
-  const banner = await readTotpErrorText(page)
-  if (banner && isIncorrectTotpError(banner)) return true
-  // Fallback: chỉ khi banner có chữ code + (wrong|invalid|incorrect)
-  if (
-    banner.includes('code') &&
-    (banner.includes('wrong') || banner.includes('invalid') || banner.includes('incorrect'))
-  ) {
-    return true
+  try {
+    const banner = await readTotpErrorText(page)
+    if (banner && isIncorrectTotpError(banner)) return true
+    // Fallback: chỉ khi banner có chữ code + (wrong|invalid|incorrect)
+    if (
+      banner.includes('code') &&
+      (banner.includes('wrong') || banner.includes('invalid') || banner.includes('incorrect'))
+    ) {
+      return true
+    }
+    return false
+  } catch (error) {
+    if (isDestroyedContextError(error)) return false
+    throw error
   }
-  return false
 }
 
 /** Chỉ bỏ qua khi Google BẮT buộc xác minh SĐT (không chỉ nhắc tới phone trên trang 2FA/speedbump) */
@@ -441,15 +578,23 @@ async function resetToLoginPage(page: Page): Promise<void> {
 
   // Đi thẳng trang login (không qua about:blank để tránh nhảy thêm lần)
   await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
-  await delay(600)
+  await humanDelay(900, 1600)
 }
 
 async function assertNotRobot(
   page: Page,
   options?: { ignorePhone?: boolean; ignoreTotpError?: boolean }
 ): Promise<void> {
-  const text = await pageText(page)
-  const url = page.url()
+  let text = ''
+  let url = ''
+  try {
+    text = await pageText(page)
+    url = page.url()
+  } catch (error) {
+    // Đang navigate (Sign in faster / inbox) — bỏ qua kiểm tra lỗi cứng
+    if (isDestroyedContextError(error)) return
+    throw error
+  }
   if (isRobotChallenge(text)) {
     // Không reset ở đây — chỉ throw; caller/catch reset đúng 1 lần
     throw new SkipLoginError(
@@ -487,20 +632,43 @@ async function typeFully(
   const el = await findVisible(page, selectors, timeoutMs)
   if (!el) throw new Error(`Không tìm thấy ô nhập (${selectors[0]})`)
 
-  await el.click({ delay: 40 })
-  await delay(200)
+  await humanClickHandle(page, el)
+  await humanDelay(280, 550)
 
+  // Xóa nội dung cũ (Ctrl+A → Backspace) với nhịp chậm
   await page.keyboard.down('Control')
+  await humanDelay(40, 90)
   await page.keyboard.press('KeyA')
+  await humanDelay(40, 90)
   await page.keyboard.up('Control')
+  await humanDelay(80, 160)
   await page.keyboard.press('Backspace')
-  await delay(150)
+  await humanDelay(200, 420)
 
-  await el.type(value, { delay: 75 })
-  await delay(400)
+  await typeLikeHuman(page, value)
+  await humanDelay(450, 900)
 
   let current = await readInputValue(el)
   if (current !== value) {
+    // Thử gõ lại chậm hơn — tránh set value bằng JS (dấu hiệu bot)
+    loginDebugLog('typeFully lệch, gõ lại', { got: current.length, need: value.length })
+    await humanClickHandle(page, el)
+    await humanDelay(200, 400)
+    await page.keyboard.down('Control')
+    await page.keyboard.press('KeyA')
+    await page.keyboard.up('Control')
+    await page.keyboard.press('Backspace')
+    await humanDelay(250, 450)
+    for (const ch of value) {
+      await page.keyboard.type(ch, { delay: 0 })
+      await humanDelay(140, 260)
+    }
+    await humanDelay(400, 700)
+    current = await readInputValue(el)
+  }
+
+  if (current !== value) {
+    // Fallback cuối: set value + event (chỉ khi gõ thất bại)
     await el.evaluate((node, v) => {
       const input = node as HTMLInputElement
       const proto = window.HTMLInputElement.prototype
@@ -509,7 +677,7 @@ async function typeFully(
       input.dispatchEvent(new Event('input', { bubbles: true }))
       input.dispatchEvent(new Event('change', { bubbles: true }))
     }, value)
-    await delay(300)
+    await humanDelay(300, 500)
     current = await readInputValue(el)
   }
 
@@ -556,8 +724,11 @@ async function clickNext(
   for (const id of preferredIds) {
     const btn = await findVisible(page, [`#${id}`, `button#${id}`], 2500)
     if (btn) {
-      await delay(350)
-      await btn.click({ delay: 30 }).catch(() => undefined)
+      await humanDelay(500, 1100)
+      const usedMouse = await trustedMouseClick(page, btn)
+      if (!usedMouse) {
+        await btn.click({ delay: rand(40, 90) }).catch(() => undefined)
+      }
       await btn.dispose()
       clicked = true
       break
@@ -565,48 +736,63 @@ async function clickNext(
   }
 
   if (!clicked) {
-    clicked = await page.evaluate(() => {
-      const candidates = Array.from(
-        document.querySelectorAll('button, div[role="button"], span[role="button"]')
-      )
-      const next = candidates.find((n) => {
-        const t = (n.textContent || '').trim().toLowerCase()
-        return t === 'next' || t === 'tiếp theo' || t === 'tiếp tục'
-      }) as HTMLElement | undefined
-      if (!next) return false
-      if (next.dataset.cmClicked === '1') return true
-      next.dataset.cmClicked = '1'
-      next.click()
-      return true
-    })
+    await humanDelay(300, 600)
+    try {
+      clicked = await page.evaluate(() => {
+        const candidates = Array.from(
+          document.querySelectorAll('button, div[role="button"], span[role="button"]')
+        )
+        const next = candidates.find((n) => {
+          const t = (n.textContent || '').trim().toLowerCase()
+          return t === 'next' || t === 'tiếp theo' || t === 'tiếp tục'
+        }) as HTMLElement | undefined
+        if (!next) return false
+        if (next.dataset.cmClicked === '1') return true
+        next.dataset.cmClicked = '1'
+        next.click()
+        return true
+      })
+    } catch (error) {
+      if (isDestroyedContextError(error)) return
+      throw error
+    }
   }
 
   if (!clicked) {
-    await delay(200)
+    await humanDelay(200, 400)
     await page.keyboard.press('Enter')
   }
 
   const started = Date.now()
   while (Date.now() - started < 8000) {
-    if (page.url() !== beforeUrl) return
-    if (options?.treatTotpAsPending) {
-      // Đang nộp TOTP: còn ô pin ≠ thành công; chờ URL đổi hoặc banner lỗi
-      if (await pageShowsTotpRejected(page)) return
+    try {
+      if (page.url() !== beforeUrl) return
+      if (options?.treatTotpAsPending) {
+        // Đang nộp TOTP: còn ô pin ≠ thành công; chờ URL đổi hoặc banner lỗi
+        if (await pageShowsTotpRejected(page)) return
+        await delay(250)
+        continue
+      }
+      const pass = await findVisible(page, PASSWORD_SELECTORS, 400)
+      if (pass) {
+        await pass.dispose()
+        return
+      }
+      const totp = await findVisible(page, TOTP_SELECTORS, 400)
+      if (totp) {
+        await totp.dispose()
+        return
+      }
+      if (await hasManualTextCaptcha(page)) return
       await delay(250)
-      continue
+    } catch (error) {
+      // Sau Next (đặc biệt 2FA) trang navigate → context destroyed = đã chuyển trang
+      if (isDestroyedContextError(error)) {
+        loginDebugLog('clickNext: navigation — coi như đã chuyển bước')
+        return
+      }
+      throw error
     }
-    const pass = await findVisible(page, PASSWORD_SELECTORS, 400)
-    if (pass) {
-      await pass.dispose()
-      return
-    }
-    const totp = await findVisible(page, TOTP_SELECTORS, 400)
-    if (totp) {
-      await totp.dispose()
-      return
-    }
-    if (await hasManualTextCaptcha(page)) return
-    await delay(250)
   }
 }
 
@@ -692,11 +878,18 @@ function isStillOnAuthChallenge(url: string): boolean {
 }
 
 async function isLoggedIn(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase()
+  let url = ''
+  try {
+    url = page.url().toLowerCase()
+  } catch {
+    return false
+  }
   // Landing Workspace ≠ đã vào hộp thư
   if (isWorkspaceMarketingUrl(url)) return false
 
   if (isRealGmailAppUrl(url)) return true
+  // Passkey / Sign in faster / speedbump = đã xác thực xong, chỉ còn màn tùy chọn
+  if (isPostAuthOptionalUrl(url)) return true
   if (url.includes('myaccount.google.com')) return true
   if (url.includes('accounts.google.com/signin/continue')) return true
   if (url.includes('accounts.google.com') && url.includes('checkcookie')) return true
@@ -711,52 +904,86 @@ async function isLoggedIn(page: Page): Promise<boolean> {
 }
 
 async function clickOptionalSkip(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase()
-  // Không bấm lung tung trên trang login / captcha / marketing / đang nhập 2FA
-  if (isWorkspaceMarketingUrl(url)) return false
-  if (url.includes('/identifier') || url.includes('/pwd') || url.includes('/challenge/totp')) {
+  let url = ''
+  try {
+    url = page.url().toLowerCase()
+  } catch {
     return false
   }
-  if (await hasManualTextCaptcha(page)) return false
+  // Không bấm lung tung trên trang login / captcha / marketing / đang nhập 2FA
+  if (isWorkspaceMarketingUrl(url)) return false
+  if (
+    url.includes('/identifier') ||
+    url.includes('/pwd') ||
+    (url.includes('/challenge/totp') && !url.includes('passkey'))
+  ) {
+    return false
+  }
+  try {
+    if (await hasManualTextCaptcha(page)) return false
+  } catch (error) {
+    if (isDestroyedContextError(error)) return false
+    throw error
+  }
 
-  return page.evaluate(() => {
-    const allowedExact = new Set([
-      'not now',
-      'skip',
-      'để sau',
-      'bỏ qua',
-      'cancel',
-      'hủy',
-      'no thanks',
-      'không, cảm ơn'
-    ])
-    const allowedIncludes = [
-      'not now',
-      'skip for now',
-      'remind me later',
-      'để sau',
-      'bỏ qua',
-      'không phải bây giờ'
-    ]
-    const nodes = Array.from(
-      document.querySelectorAll('button, div[role="button"], span[role="button"], a')
-    )
-    const skip = nodes.find((n) => {
-      const el = n as HTMLElement
-      if (el.dataset.cmClicked === '1') return false
-      const t = (el.textContent || el.getAttribute('aria-label') || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase()
-      if (!t || t.length > 48) return false
-      if (allowedExact.has(t)) return true
-      return allowedIncludes.some((a) => t === a || t.startsWith(a))
-    }) as HTMLElement | undefined
-    if (!skip) return false
-    skip.dataset.cmClicked = '1'
-    skip.click()
-    return true
-  })
+  try {
+    return await page.evaluate(() => {
+      const allowedExact = new Set([
+        'not now',
+        'skip',
+        'để sau',
+        'bỏ qua',
+        'cancel',
+        'hủy',
+        'no thanks',
+        'không, cảm ơn',
+        'không cảm ơn',
+        'later',
+        'maybe later'
+      ])
+      const allowedIncludes = [
+        'not now',
+        'skip for now',
+        'remind me later',
+        'để sau',
+        'bỏ qua',
+        'không phải bây giờ',
+        "don't turn on",
+        'dont turn on',
+        "don't use",
+        'dont use',
+        'no thanks',
+        'continue without',
+        'không dùng',
+        'không bật',
+        'để lần sau'
+      ]
+      const nodes = Array.from(
+        document.querySelectorAll('button, div[role="button"], span[role="button"], a')
+      )
+      const skip = nodes.find((n) => {
+        const el = n as HTMLElement
+        if (el.dataset.cmClicked === '1') return false
+        const t = (el.textContent || el.getAttribute('aria-label') || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase()
+        if (!t || t.length > 64) return false
+        // Không bấm Continue/Next trên màn passkey (sẽ bật tạo khóa)
+        if (t === 'continue' || t === 'tiếp tục' || t === 'next' || t === 'tiếp theo') return false
+        if (t.includes('create') || t.includes('tạo khóa') || t.includes('turn on')) return false
+        if (allowedExact.has(t)) return true
+        return allowedIncludes.some((a) => t === a || t.startsWith(a) || t.includes(a))
+      }) as HTMLElement | undefined
+      if (!skip) return false
+      skip.dataset.cmClicked = '1'
+      skip.click()
+      return true
+    })
+  } catch (error) {
+    if (isDestroyedContextError(error)) return false
+    throw error
+  }
 }
 
 /** Màn "2-Step Verification" → chọn phương thức (Authenticator / Tap Yes / Try another way) */
@@ -997,6 +1224,7 @@ async function clickGoogleAuthenticatorOption(page: Page): Promise<boolean> {
   }
   const started = Date.now()
   loginDebugLog('bắt đầu click Authenticator', { url: page.url() })
+  emitLoginProgress('Chọn Google Authenticator')
   await dumpAuthenticatorDom(page)
 
   while (Date.now() - started < 20000) {
@@ -1295,21 +1523,18 @@ async function fillTotpCode(page: Page, code: string): Promise<boolean> {
     return false
   }
 
-  await el.evaluate((node) => {
-    ;(node as HTMLElement).scrollIntoView({ block: 'center', inline: 'nearest' })
-  })
-  await delay(150)
-  await el.click({ delay: 40 }).catch(() => undefined)
+  await humanClickHandle(page, el)
+  await humanDelay(200, 400)
   await el.focus().catch(() => undefined)
-  await delay(120)
+  await humanDelay(100, 200)
 
   await page.keyboard.down('Control')
   await page.keyboard.press('KeyA')
   await page.keyboard.up('Control')
   await page.keyboard.press('Backspace')
-  await delay(80)
-  await page.keyboard.type(code, { delay: 70 })
-  await delay(200)
+  await humanDelay(120, 250)
+  await typeLikeHuman(page, code)
+  await humanDelay(250, 500)
 
   await page.evaluate((pin) => {
     const pick = Array.from(document.querySelectorAll('input')) as HTMLInputElement[]
@@ -1348,8 +1573,13 @@ async function fillTotpCode(page: Page, code: string): Promise<boolean> {
   })
   if (typed.replace(/\s+/g, '') !== code) {
     await el.focus().catch(() => undefined)
-    await page.keyboard.type(code, { delay: 80 })
-    await delay(200)
+    await page.keyboard.down('Control')
+    await page.keyboard.press('KeyA')
+    await page.keyboard.up('Control')
+    await page.keyboard.press('Backspace')
+    await humanDelay(150, 300)
+    await typeLikeHuman(page, code)
+    await humanDelay(200, 400)
     typed = await readInputValue(el)
     loginDebugLog('totp gõ lần 2', {
       len: typed.replace(/\s+/g, '').length,
@@ -1414,6 +1644,7 @@ async function handlePostPasswordChallenges(
 
     totpAttempts += 1
     loginDebugLog('submit totp', { codeLen: code.length, url: page.url() })
+    emitLoginProgress('Nhập & nộp mã 2FA')
     const filled = await fillTotpCode(page, code)
     if (!filled) {
       throw new SkipLoginError(
@@ -1422,182 +1653,249 @@ async function handlePostPasswordChallenges(
     }
 
     await delay(250)
-    await clickNext(
-      page,
-      ['totpNext', 'idvPreregisteredPhoneNext', 'idvanywhereverifyNext'],
-      { treatTotpAsPending: true }
-    )
+    // Đánh dấu đã nộp trước khi chờ navigate — context destroyed ≠ mã sai
     totpSubmitted = true
+    try {
+      await clickNext(
+        page,
+        ['totpNext', 'idvPreregisteredPhoneNext', 'idvanywhereverifyNext'],
+        { treatTotpAsPending: true }
+      )
+    } catch (error) {
+      if (!isDestroyedContextError(error)) throw error
+      loginDebugLog('clickNext totp: navigation — 2FA đã nộp')
+    }
     await delay(2000)
 
-    if (await pageShowsTotpRejected(page)) {
-      throw new SkipLoginError(
-        `Mã 2FA không chính xác (${gmail.email}) — bỏ qua mail này để thử mail khác.`
-      )
-    }
-  }
+    // Sau Next 2FA trang hay nhảy Sign in faster / passkey — chờ navigation
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => undefined)
+    await delay(600)
 
-  for (let step = 0; step < 16; step++) {
-    await delay(totpSubmitted ? 800 : 1200)
-    if (await isLoggedIn(page)) return { totpSubmitted }
-
-    const url = page.url()
-    const onTotpUrl = isTotpChallengeUrl(url)
-
-    loginDebugLog(`challenge step=${step}`, {
-      url,
-      onTotpUrl,
-      totpSubmitted,
-      hasSecret: Boolean(resolveTotpSecret(gmail)),
-      secretLen: resolveTotpSecret(gmail).length,
-      rawParts: (gmail.raw || '').split('|').length
-    })
-
-    // Màn chọn Authenticator (DOM type=6) — LUÔN bấm, không chờ có secret
-    const chooserVisible = !onTotpUrl && (await pageHasAuthenticatorChooser(page))
-    loginDebugLog('chooserVisible', chooserVisible)
-    if (chooserVisible) {
-      const clicked = await clickGoogleAuthenticatorOption(page)
-      if (!clicked && !isTotpChallengeUrl(page.url())) {
-        throw new SkipLoginError(
-          `Không bấm được option Google Authenticator (${gmail.email}) — bỏ qua mail này.`
-        )
-      }
-      continue
-    }
-
-    // Ưu tiên ô/URL TOTP TRƯỚC assertNotRobot — tránh false "mã sai" rồi refresh
-    let totpField = await findTotpInput(page, onTotpUrl ? 5000 : 1500)
-    if (!totpField && onTotpUrl) {
-      await dumpTotpInputs(page)
-      await delay(800)
-      totpField = await findTotpInput(page, 8000)
-    }
-
-    if (totpField || onTotpUrl) {
-      if (totpField) await totpField.dispose()
-      if (!totpField) {
-        loginDebugLog('totp url nhưng chưa thấy ô', { url: page.url() })
-        continue
-      }
-
-      if (totpSubmitted) {
-        if (await pageShowsTotpRejected(page)) {
-          throw new SkipLoginError(
-            `Mã 2FA không chính xác (${gmail.email}) — bỏ qua mail này để thử mail khác.`
-          )
-        }
-        if (totpAttempts >= 2) {
-          throw new SkipLoginError(
-            `Không vượt qua bước nhập mã 2FA (${gmail.email}) — bỏ qua mail này.`
-          )
-        }
-        await submitTotpOrSkip()
-        continue
-      }
-
-      await submitTotpOrSkip()
-      if (await isLoggedIn(page)) return { totpSubmitted }
-
+    try {
       if (await pageShowsTotpRejected(page)) {
         throw new SkipLoginError(
           `Mã 2FA không chính xác (${gmail.email}) — bỏ qua mail này để thử mail khác.`
         )
       }
-      const afterText = await pageText(page)
+    } catch (error) {
+      if (error instanceof SkipLoginError) throw error
+      if (!isDestroyedContextError(error)) throw error
+      loginDebugLog('totp check: navigation — bỏ qua kiểm tra mã sai')
+    }
+
+    // Đã qua 2FA → màn tùy chọn / inbox
+    try {
       const afterUrl = page.url()
-      if (isPhoneVerificationRequired(afterText, afterUrl)) {
-        throw new SkipLoginError('Sau 2FA Google vẫn bắt xác minh SĐT — bỏ qua.')
+      if (isPostAuthOptionalUrl(afterUrl) || (await isLoggedIn(page))) {
+        emitLoginProgress('2FA OK — bỏ màn Sign in faster / speedbump')
+        await clickOptionalSkip(page).catch(() => false)
+        await delay(500)
+        await clickOptionalSkip(page).catch(() => false)
+        return
       }
-      if (looksLikeRecoveryChallenge(afterText, afterUrl)) {
-        await clickOptionalSkip(page)
-        return { totpSubmitted }
+    } catch (error) {
+      if (isDestroyedContextError(error)) {
+        loginDebugLog('sau 2FA: context destroyed — coi như login OK')
+        return
       }
-      if (!isStillOnAuthChallenge(afterUrl) && !isWorkspaceMarketingUrl(afterUrl)) {
-        await clickOptionalSkip(page)
-        return { totpSubmitted }
-      }
-      continue
+      throw error
     }
+  }
 
-    await assertNotRobot(page, {
-      ignorePhone: totpSubmitted,
-      ignoreTotpError: !totpSubmitted
-    })
-
-    const text = await pageText(page)
-
-    // ——— Đã nộp 2FA thành công: không đụng recovery, skip speedbump → mở inbox ———
-    if (totpSubmitted) {
-      if (isPhoneVerificationRequired(text, url)) {
-        throw new SkipLoginError('Sau 2FA Google vẫn bắt xác minh SĐT — bỏ qua.')
-      }
-      if (looksLikeRecoveryChallenge(text, url)) {
-        await clickOptionalSkip(page)
-        await delay(400)
+  for (let step = 0; step < 16; step++) {
+    try {
+      await delay(totpSubmitted ? 800 : 1200)
+      if (await isLoggedIn(page)) {
+        if (totpSubmitted || isPostAuthOptionalUrl(page.url())) {
+          await clickOptionalSkip(page).catch(() => false)
+        }
         return { totpSubmitted }
       }
-      if (
-        !isStillOnAuthChallenge(url) ||
-        url.includes('speedbump') ||
-        url.includes('signin/continue') ||
-        url.includes('myaccount.google.com')
-      ) {
-        await clickOptionalSkip(page)
+
+      const url = page.url()
+      const onTotpUrl = isTotpChallengeUrl(url)
+
+      loginDebugLog(`challenge step=${step}`, {
+        url,
+        onTotpUrl,
+        totpSubmitted,
+        hasSecret: Boolean(resolveTotpSecret(gmail)),
+        secretLen: resolveTotpSecret(gmail).length,
+        rawParts: (gmail.raw || '').split('|').length
+      })
+
+      // Đã nộp 2FA + đang ở Sign in faster / passkey / speedbump → skip & xong
+      if (totpSubmitted && (isPostAuthOptionalUrl(url) || isSignInFasterText(await pageText(page)))) {
+        emitLoginProgress('Bỏ qua Sign in faster / passkey → inbox')
+        await clickOptionalSkip(page).catch(() => false)
+        await delay(600)
+        await clickOptionalSkip(page).catch(() => false)
         return { totpSubmitted }
       }
-      await clickOptionalSkip(page)
-      return { totpSubmitted }
-    }
 
-    // Màn chọn phương thức — không chạy khi đã vào totp
-    if (shouldClickAuthenticatorChooser(text, url) && !onTotpUrl) {
-      const clicked = await clickGoogleAuthenticatorOption(page)
-      if (!clicked) {
-        throw new SkipLoginError(
-          `Không bấm được option Google Authenticator (${gmail.email}) — bỏ qua mail này.`
-        )
+      // Màn chọn Authenticator (DOM type=6) — LUÔN bấm, không chờ có secret
+      const chooserVisible = !onTotpUrl && (await pageHasAuthenticatorChooser(page))
+      loginDebugLog('chooserVisible', chooserVisible)
+      if (chooserVisible) {
+        const clicked = await clickGoogleAuthenticatorOption(page)
+        if (!clicked && !isTotpChallengeUrl(page.url())) {
+          throw new SkipLoginError(
+            `Không bấm được option Google Authenticator (${gmail.email}) — bỏ qua mail này.`
+          )
+        }
+        continue
       }
-      const totpAfter = await findVisible(page, TOTP_SELECTORS, 15000)
-      if (totpAfter) await totpAfter.dispose()
-      continue
-    }
 
-    // Chỉ đi recovery khi CHƯA làm 2FA và không có secret TOTP
-    if (looksLikeRecoveryChallenge(text, url)) {
-      if (resolveTotpSecret(gmail)) {
+      // Ưu tiên ô/URL TOTP TRƯỚC assertNotRobot — tránh false "mã sai" rồi refresh
+      let totpField = await findTotpInput(page, onTotpUrl ? 5000 : 1500)
+      if (!totpField && onTotpUrl) {
+        await dumpTotpInputs(page)
+        await delay(800)
+        totpField = await findTotpInput(page, 8000)
+      }
+
+      if (totpField || onTotpUrl) {
+        if (totpField) await totpField.dispose()
+        if (!totpField) {
+          loginDebugLog('totp url nhưng chưa thấy ô', { url: page.url() })
+          continue
+        }
+
+        if (totpSubmitted) {
+          if (await pageShowsTotpRejected(page)) {
+            throw new SkipLoginError(
+              `Mã 2FA không chính xác (${gmail.email}) — bỏ qua mail này để thử mail khác.`
+            )
+          }
+          if (totpAttempts >= 2) {
+            throw new SkipLoginError(
+              `Không vượt qua bước nhập mã 2FA (${gmail.email}) — bỏ qua mail này.`
+            )
+          }
+          await submitTotpOrSkip()
+          continue
+        }
+
+        await submitTotpOrSkip()
+        if (await isLoggedIn(page)) {
+          await clickOptionalSkip(page).catch(() => false)
+          return { totpSubmitted }
+        }
+
+        if (await pageShowsTotpRejected(page)) {
+          throw new SkipLoginError(
+            `Mã 2FA không chính xác (${gmail.email}) — bỏ qua mail này để thử mail khác.`
+          )
+        }
+        const afterText = await pageText(page)
+        const afterUrl = page.url()
+        if (isPhoneVerificationRequired(afterText, afterUrl)) {
+          throw new SkipLoginError('Sau 2FA Google vẫn bắt xác minh SĐT — bỏ qua.')
+        }
+        if (looksLikeRecoveryChallenge(afterText, afterUrl)) {
+          await clickOptionalSkip(page)
+          return { totpSubmitted }
+        }
+        if (isPostAuthOptionalUrl(afterUrl) || isSignInFasterText(afterText)) {
+          await clickOptionalSkip(page).catch(() => false)
+          return { totpSubmitted }
+        }
+        if (!isStillOnAuthChallenge(afterUrl) && !isWorkspaceMarketingUrl(afterUrl)) {
+          await clickOptionalSkip(page)
+          return { totpSubmitted }
+        }
+        continue
+      }
+
+      await assertNotRobot(page, {
+        ignorePhone: totpSubmitted,
+        ignoreTotpError: !totpSubmitted
+      })
+
+      const text = await pageText(page)
+
+      // ——— Đã nộp 2FA thành công: không đụng recovery, skip speedbump → mở inbox ———
+      if (totpSubmitted) {
+        if (isPhoneVerificationRequired(text, url)) {
+          throw new SkipLoginError('Sau 2FA Google vẫn bắt xác minh SĐT — bỏ qua.')
+        }
+        if (looksLikeRecoveryChallenge(text, url)) {
+          await clickOptionalSkip(page)
+          await delay(400)
+          return { totpSubmitted }
+        }
+        if (
+          isPostAuthOptionalUrl(url) ||
+          isSignInFasterText(text) ||
+          !isStillOnAuthChallenge(url) ||
+          url.includes('myaccount.google.com')
+        ) {
+          await clickOptionalSkip(page).catch(() => false)
+          await delay(400)
+          await clickOptionalSkip(page).catch(() => false)
+          return { totpSubmitted }
+        }
+        await clickOptionalSkip(page).catch(() => false)
+        return { totpSubmitted }
+      }
+
+      // Màn chọn phương thức — không chạy khi đã vào totp
+      if (shouldClickAuthenticatorChooser(text, url) && !onTotpUrl) {
         const clicked = await clickGoogleAuthenticatorOption(page)
         if (!clicked) {
-          await clickByText(page, ['try another way', 'thử cách khác'], 3000)
+          throw new SkipLoginError(
+            `Không bấm được option Google Authenticator (${gmail.email}) — bỏ qua mail này.`
+          )
         }
-        await delay(800)
+        const totpAfter = await findVisible(page, TOTP_SELECTORS, 15000)
+        if (totpAfter) await totpAfter.dispose()
         continue
       }
-      if (!gmail.recoveryEmail) {
-        throw new Error('Google yêu cầu email khôi phục nhưng hồ sơ chưa có.')
-      }
-      const el = await typeFully(
-        page,
-        [
-          'input[name="knowledgePreregisteredEmailResponse"]',
-          'input[id="knowledge-preregistered-email-response"]',
-          'input[type="email"]'
-        ],
-        gmail.recoveryEmail,
-        10000
-      )
-      await el.dispose()
-      await clickNext(page, ['idvPreregisteredEmailNext', 'idvanywhereverifyNext'])
-      continue
-    }
 
-    // Speedbump tùy chọn (thêm SĐT, lưu thiết bị...) → Not now / Skip
-    if (!isStillOnAuthChallenge(url) || url.includes('speedbump') || url.includes('signin/continue')) {
-      const skippedOptional = await clickOptionalSkip(page)
-      if (skippedOptional) {
-        await delay(1000)
+      // Chỉ đi recovery khi CHƯA làm 2FA và không có secret TOTP
+      if (looksLikeRecoveryChallenge(text, url)) {
+        if (resolveTotpSecret(gmail)) {
+          const clicked = await clickGoogleAuthenticatorOption(page)
+          if (!clicked) {
+            await clickByText(page, ['try another way', 'thử cách khác'], 3000)
+          }
+          await delay(800)
+          continue
+        }
+        if (!gmail.recoveryEmail) {
+          throw new Error('Google yêu cầu email khôi phục nhưng hồ sơ chưa có.')
+        }
+        const el = await typeFully(
+          page,
+          [
+            'input[name="knowledgePreregisteredEmailResponse"]',
+            'input[id="knowledge-preregistered-email-response"]',
+            'input[type="email"]'
+          ],
+          gmail.recoveryEmail,
+          10000
+        )
+        await el.dispose()
+        await clickNext(page, ['idvPreregisteredEmailNext', 'idvanywhereverifyNext'])
         continue
       }
+
+      // Speedbump tùy chọn (thêm SĐT, lưu thiết bị...) → Not now / Skip
+      if (!isStillOnAuthChallenge(url) || isPostAuthOptionalUrl(url)) {
+        const skippedOptional = await clickOptionalSkip(page)
+        if (skippedOptional) {
+          await delay(1000)
+          continue
+        }
+      }
+    } catch (error) {
+      if (totpSubmitted && isDestroyedContextError(error)) {
+        loginDebugLog('challenge step: navigation sau 2FA — coi như OK', {
+          message: error instanceof Error ? error.message : String(error)
+        })
+        return { totpSubmitted }
+      }
+      throw error
     }
   }
 
@@ -1606,20 +1904,43 @@ async function handlePostPasswordChallenges(
 
 async function ensureRealGmailInbox(page: Page): Promise<void> {
   for (let i = 0; i < 3; i++) {
-    if (isWorkspaceMarketingUrl(page.url())) {
+    let url = ''
+    try {
+      url = page.url()
+    } catch (error) {
+      if (isDestroyedContextError(error)) {
+        await delay(1000)
+        continue
+      }
+      throw error
+    }
+
+    if (isWorkspaceMarketingUrl(url)) {
       await page.goto(GMAIL_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(
         () => undefined
       )
       await delay(1500)
-    } else if (!isRealGmailAppUrl(page.url())) {
+    } else if (!isRealGmailAppUrl(url)) {
+      // Còn kẹt Sign in faster / speedbump → skip rồi mới goto inbox
+      if (isPostAuthOptionalUrl(url)) {
+        await clickOptionalSkip(page).catch(() => false)
+        await delay(600)
+      }
       await page.goto(GMAIL_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(
         () => undefined
       )
       await delay(1500)
     }
 
-    if (isRealGmailAppUrl(page.url())) {
-      if (!page.url().toLowerCase().includes('#inbox')) {
+    try {
+      url = page.url()
+    } catch {
+      await delay(800)
+      continue
+    }
+
+    if (isRealGmailAppUrl(url)) {
+      if (!url.toLowerCase().includes('#inbox')) {
         await page.goto(GMAIL_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(
           () => undefined
         )
@@ -1632,7 +1953,13 @@ async function ensureRealGmailInbox(page: Page): Promise<void> {
     await delay(800)
   }
 
-  if (!isRealGmailAppUrl(page.url())) {
+  let finalUrl = ''
+  try {
+    finalUrl = page.url()
+  } catch {
+    // ignore
+  }
+  if (!isRealGmailAppUrl(finalUrl)) {
     throw new Error(
       'Chưa vào được Gmail inbox (mail.google.com). Có thể đang kẹt trang Workspace/marketing.'
     )
@@ -1665,45 +1992,83 @@ async function performLogin(
   }
 
   // Luôn bắt đầu từ trang đăng nhập (không nhảy inbox trước)
+  emitLoginProgress('Mở trang đăng nhập Google')
   await resetToLoginPage(page)
+  await humanDelay(700, 1400)
   await assertNotRobot(page)
 
+  emitLoginProgress('Nhập email (chậm, giống tay)')
   const emailInput = await typeFully(page, EMAIL_SELECTORS, gmail.email, 20000)
-  await delay(500)
+  await humanDelay(600, 1200)
   const emailValue = await readInputValue(emailInput)
   await emailInput.dispose()
   if (emailValue !== gmail.email) {
     throw new Error('Email chưa nhập xong — không bấm Next.')
   }
   await assertNotRobot(page)
+  await humanDelay(400, 900)
   await clickNext(page, ['identifierNext'])
-  await delay(800)
+  await humanDelay(1200, 2200)
   await waitForManualCaptchaIfNeeded(page)
   await waitForPasswordStep(page)
+  await humanDelay(500, 1000)
 
+  emitLoginProgress('Nhập mật khẩu (chậm, giống tay)')
   const passInput = await typeFully(page, PASSWORD_SELECTORS, gmail.password, 20000)
-  await delay(500)
+  await humanDelay(700, 1400)
   const passValue = await readInputValue(passInput)
   await passInput.dispose()
   if (passValue !== gmail.password) {
     throw new Error('Mật khẩu chưa nhập xong — không bấm Next.')
   }
   await assertNotRobot(page)
+  await humanDelay(500, 1100)
   await clickNext(page, ['passwordNext'])
-  await delay(800)
+  await humanDelay(1200, 2400)
   await assertNotRobot(page)
   await waitForChallengeAfterPassword(page)
 
-  const { totpSubmitted } = await handlePostPasswordChallenges(page, gmail)
-  await assertNotRobot(page, { ignorePhone: totpSubmitted, ignoreTotpError: !totpSubmitted })
+  emitLoginProgress('Xử lý xác minh sau mật khẩu (2FA / challenge)')
+  let totpSubmitted = false
+  try {
+    ;({ totpSubmitted } = await handlePostPasswordChallenges(page, gmail))
+  } catch (error) {
+    if (!isDestroyedContextError(error)) throw error
+    loginDebugLog('performLogin: navigation sau challenge — tiếp tục inbox')
+    await delay(800)
+    try {
+      const url = page.url()
+      if (
+        isPostAuthOptionalUrl(url) ||
+        isRealGmailAppUrl(url) ||
+        (await isLoggedIn(page))
+      ) {
+        totpSubmitted = true
+      } else {
+        throw error
+      }
+    } catch (inner) {
+      if (!isDestroyedContextError(inner)) throw inner
+      // Vẫn thử vào inbox — thường đã login xong
+      totpSubmitted = true
+    }
+  }
+
+  try {
+    await assertNotRobot(page, { ignorePhone: totpSubmitted, ignoreTotpError: !totpSubmitted })
+  } catch (error) {
+    if (!isDestroyedContextError(error)) throw error
+  }
 
   // Sau 2FA (hoặc login xong): bỏ màn hình phụ rồi vào inbox — không đi recovery nữa
   if (totpSubmitted) {
     await clickOptionalSkip(page).catch(() => false)
-    await delay(400)
+    await humanDelay(500, 900)
+    await clickOptionalSkip(page).catch(() => false)
   }
 
   // Chỉ SAU khi login xong mới vào inbox
+  emitLoginProgress('Vào Gmail inbox')
   await ensureRealGmailInbox(page)
 }
 
@@ -1739,11 +2104,15 @@ export async function loginGmailForProfile(
   const autoLoginGmail =
     options?.autoLoginGmail !== undefined ? Boolean(options.autoLoginGmail) : profile.autoLoginGmail
 
+  return loginLogContext.run(
+    { profileId, profileName: profile.name, email: gmail!.email },
+    async () => {
   let browser: Browser | null = null
   let detachGuard: (() => void) | null = null
   let keepExtraTabs = false
 
   try {
+    emitLoginProgress('Mở Chrome')
     if (!options?.alreadyLaunched) {
       const launched = await launchProfile(profileId, {
         skipHomepage: true,
@@ -1793,7 +2162,8 @@ export async function loginGmailForProfile(
       throw new Error('Đăng nhập chưa vào được mail.google.com/mail — không lưu hồ sơ.')
     }
 
-    // Lưu Gmail vào profile chỉ khi login + inbox OK (không ghi homepage = inbox)
+    emitLoginProgress('Đăng nhập OK — đã gán mail vào profile', 'success')
+    // Gán Gmail ngay khi vào inbox — 2fa.live / post-setup chạy sau, không ảnh hưởng việc đã gắn
     const saved = db.updateProfile(profileId, {
       gmail,
       autoLoginGmail
@@ -1825,45 +2195,66 @@ export async function loginGmailForProfile(
         : Boolean(savedSetup.formFillEnabled)
     const formTitle = (options?.formTitle ?? savedSetup.formTitle ?? '').trim()
     const formDescription = (options?.formDescription ?? savedSetup.formDescription ?? '').trim()
+    const formHeaderPath = (options?.formHeaderPath ?? savedSetup.formHeaderPath ?? '').trim()
+
+    // Ngay sau login OK: mở 2fa.live trước, rồi mới chạy post-setup
+    keepExtraTabs = true
+    try {
+      emitLoginProgress('Mở 2fa.live và lấy mã')
+      const twoFaStep = await open2faLiveTab(browser, getGmailColumn3(gmail))
+      emitLoginProgress(
+        `[${twoFaStep.ok ? 'OK' : 'WARN'} ${twoFaStep.step}] ${twoFaStep.detail}`,
+        twoFaStep.ok ? 'success' : 'warn'
+      )
+      postSetupNote = formatPostSetupSummary([twoFaStep])
+    } catch (error) {
+      const note = `2fa.live lỗi: ${error instanceof Error ? error.message : 'không xác định'}`
+      emitLoginProgress(note, 'warn')
+      postSetupNote = note
+    }
 
     if (shouldPostSetup) {
       keepExtraTabs = true
-      postSetupNote = 'Đang chạy post-setup (avatar → Sheet → Form → Apps Script)...'
+      emitLoginProgress('Bắt đầu post-setup (avatar → Sheet → Form/Publish → Apps Script)')
       try {
-        const steps = await runPostLoginSetup(browser, {
-          avatarPath,
-          appsScriptPath,
-          appsScriptCode,
-          totpSecret: resolveTotpSecret(gmail) || profile.gmail?.totpSecret || undefined,
-          formFillEnabled,
-          formTitle,
-          formDescription
-        })
-        postSetupNote = formatPostSetupSummary(steps)
+        const steps = await runPostLoginSetup(
+          browser,
+          {
+            avatarPath,
+            appsScriptPath,
+            appsScriptCode,
+            totpSecret: resolveTotpSecret(gmail) || profile.gmail?.totpSecret || undefined,
+            formFillEnabled,
+            formTitle,
+            formDescription,
+            formHeaderPath: formHeaderPath || undefined
+          },
+          (step) => {
+            emitLoginProgress(
+              `[${step.ok ? 'OK' : 'WARN'} ${step.step}] ${step.detail}`,
+              step.ok ? 'success' : 'warn'
+            )
+          }
+        )
+        postSetupNote = [postSetupNote, formatPostSetupSummary(steps)].filter(Boolean).join(' · ')
       } catch (error) {
-        postSetupNote =
+        const note =
           error instanceof Error
             ? `Post-setup lỗi: ${error.message}`
             : 'Post-setup lỗi không xác định'
+        emitLoginProgress(note, 'warn')
+        postSetupNote = [postSetupNote, note].filter(Boolean).join(' · ')
       }
     } else {
-      postSetupNote =
-        'Post-setup đang tắt — bật checkbox "Sau khi login thành công" trên trang Gmail.'
-    }
-
-    keepExtraTabs = true
-    try {
-      const twoFaStep = await open2faLiveTab(browser, getGmailColumn3(gmail))
-      postSetupNote = [postSetupNote, formatPostSetupSummary([twoFaStep])].filter(Boolean).join(' · ')
-    } catch (error) {
       postSetupNote = [
         postSetupNote,
-        `2fa.live lỗi: ${error instanceof Error ? error.message : 'không xác định'}`
+        'Post-setup đang tắt — bật checkbox "Sau khi login thành công" trên trang Gmail.'
       ]
         .filter(Boolean)
         .join(' · ')
     }
 
+    emitLoginProgress('Hoàn tất luồng login', 'success')
     return {
       profileId,
       success: true,
@@ -1903,6 +2294,7 @@ export async function loginGmailForProfile(
       message,
       skip: error instanceof SkipLoginError
     })
+    emitLoginProgress(message, 'error')
     const skipped = error instanceof SkipLoginError || message.toLowerCase().includes('not a robot')
     return {
       profileId,
@@ -1923,6 +2315,8 @@ export async function loginGmailForProfile(
       }
     }
   }
+    }
+  )
 }
 
 export async function bulkLoginGmail(ids: string[]): Promise<BulkResult> {

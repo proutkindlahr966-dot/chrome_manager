@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Columns3,
   FolderInput,
   Play,
   Plus,
@@ -11,6 +12,13 @@ import { PageHeader } from '@/components/layout/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ProfileFormModal } from '@/components/profiles/ProfileFormModal'
 import { ProfileTable } from '@/components/profiles/ProfileTable'
+import {
+  DEFAULT_VISIBLE_COLUMNS,
+  loadVisibleColumns,
+  PROFILE_COLUMNS,
+  saveVisibleColumns,
+  type ProfileColumnId
+} from '@/components/profiles/profile-columns'
 import { Modal } from '@/components/ui/Modal'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { useAppStore } from '@/stores/app-store'
@@ -29,8 +37,8 @@ export function ProfilesPage(): JSX.Element {
   const launchProfiles = useAppStore((s) => s.launchProfiles)
   const stopProfiles = useAppStore((s) => s.stopProfiles)
   const deleteProfiles = useAppStore((s) => s.deleteProfiles)
+  const resetProfile = useAppStore((s) => s.resetProfile)
   const bulkUpdateProfiles = useAppStore((s) => s.bulkUpdateProfiles)
-  const updateProfile = useAppStore((s) => s.updateProfile)
   const updateGroup = useAppStore((s) => s.updateGroup)
 
   const [formOpen, setFormOpen] = useState(false)
@@ -39,12 +47,52 @@ export function ProfilesPage(): JSX.Element {
   const [targetGroupId, setTargetGroupId] = useState('')
   const [searchInput, setSearchInput] = useState(filters.search ?? '')
   const debouncedSearch = useDebouncedValue(searchInput, 300)
+  const [visibleColumns, setVisibleColumns] = useState<ProfileColumnId[]>(() => loadVisibleColumns())
+  const [columnsOpen, setColumnsOpen] = useState(false)
+  const columnsRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if ((filters.search ?? '') !== debouncedSearch) {
       setFilters({ search: debouncedSearch })
     }
   }, [debouncedSearch, filters.search, setFilters])
+
+  useEffect(() => {
+    if (!columnsOpen) return
+    function onDocClick(e: MouseEvent): void {
+      if (!columnsRef.current?.contains(e.target as Node)) setColumnsOpen(false)
+    }
+    function onKey(e: KeyboardEvent): void {
+      if (e.key === 'Escape') setColumnsOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [columnsOpen])
+
+  function toggleColumn(id: ProfileColumnId): void {
+    const def = PROFILE_COLUMNS.find((c) => c.id === id)
+    if (def?.locked) return
+    setVisibleColumns((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      // Không cho tắt hết cột tùy chọn — luôn còn ít nhất name + actions (locked)
+      const locked = PROFILE_COLUMNS.filter((c) => c.locked).map((c) => c.id)
+      for (const lid of locked) {
+        if (!next.includes(lid)) next.push(lid)
+      }
+      saveVisibleColumns(next)
+      return next
+    })
+  }
+
+  function resetColumns(): void {
+    const next = [...DEFAULT_VISIBLE_COLUMNS]
+    saveVisibleColumns(next)
+    setVisibleColumns(next)
+  }
 
   const selectedList = useMemo(() => [...selectedIds], [selectedIds])
 
@@ -138,18 +186,27 @@ export function ProfilesPage(): JSX.Element {
     toast({ tone: 'success', title: ids.length === 1 ? 'Đã xóa hồ sơ' : `Đã xóa ${ids.length} hồ sơ` })
   }
 
-  async function handleClearGmail(id: string): Promise<void> {
+  async function handleWipeProfile(id: string): Promise<void> {
     const profile = profiles.find((p) => p.id === id)
-    if (!profile?.gmail?.email) return
+    if (!profile) return
+    const mailLine = profile.gmail?.email ? `\nGmail: ${profile.gmail.email}` : ''
     const ok = await askConfirm({
-      title: 'Gỡ Gmail khỏi hồ sơ?',
-      description: `Hồ sơ "${profile.name}"\n${profile.gmail.email}\n\nChỉ gỡ thông tin trên hồ sơ — không xóa dữ liệu Chrome.`,
-      confirmLabel: 'Gỡ Gmail',
+      title: 'Xóa sạch hồ sơ?',
+      description: `Hồ sơ "${profile.name}"${mailLine}\n\nSẽ đóng Chrome (nếu đang mở), gỡ Gmail đã gắn và xóa toàn bộ dữ liệu trình duyệt — đưa về trạng thái như hồ sơ mới. Giữ lại tên và nhóm.\n\nThao tác không thể hoàn tác.`,
+      confirmLabel: 'Xóa sạch',
       danger: true
     })
     if (!ok) return
-    await updateProfile(id, { gmail: null, autoLoginGmail: false })
-    toast({ tone: 'success', title: 'Đã gỡ Gmail khỏi hồ sơ' })
+    try {
+      await resetProfile(id)
+      toast({ tone: 'success', title: `Đã xóa sạch "${profile.name}"` })
+    } catch (error) {
+      toast({
+        tone: 'danger',
+        title: 'Không thể xóa sạch hồ sơ',
+        description: error instanceof Error ? error.message : 'Lỗi không xác định'
+      })
+    }
   }
 
   return (
@@ -179,7 +236,7 @@ export function ProfilesPage(): JSX.Element {
               onChange={(e) => setSearchInput(e.target.value)}
             />
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:w-auto lg:shrink-0">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 lg:w-auto lg:shrink-0">
             <select
               className="input"
               value={filters.groupId ?? 'all'}
@@ -227,6 +284,67 @@ export function ProfilesPage(): JSX.Element {
               <option value="desc">Giảm dần</option>
               <option value="asc">Tăng dần</option>
             </select>
+            <div className="relative col-span-2 sm:col-span-1" ref={columnsRef}>
+              <button
+                type="button"
+                className="btn-secondary w-full justify-center"
+                aria-expanded={columnsOpen}
+                aria-haspopup="listbox"
+                onClick={() => setColumnsOpen((o) => !o)}
+              >
+                <Columns3 size={15} />
+                Cột
+                <span className="text-ink-muted">
+                  ({visibleColumns.length}/{PROFILE_COLUMNS.length})
+                </span>
+              </button>
+              {columnsOpen ? (
+                <div
+                  className="absolute right-0 z-20 mt-1.5 w-56 rounded-xl border border-line bg-surface p-2 shadow-lg"
+                  role="listbox"
+                  aria-label="Chọn cột hiển thị"
+                >
+                  <div className="mb-1.5 px-2 text-xs font-medium uppercase tracking-wide text-ink-muted">
+                    Hiển thị cột
+                  </div>
+                  <ul className="max-h-72 space-y-0.5 overflow-y-auto">
+                    {PROFILE_COLUMNS.map((col) => {
+                      const checked = visibleColumns.includes(col.id)
+                      return (
+                        <li key={col.id}>
+                          <label
+                            className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-surface-muted ${
+                              col.locked ? 'opacity-70' : ''
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="accent-[var(--accent)]"
+                              checked={checked}
+                              disabled={col.locked}
+                              onChange={() => toggleColumn(col.id)}
+                            />
+                            <span className="flex-1 text-ink">{col.label}</span>
+                            {col.locked ? (
+                              <span className="text-[10px] uppercase text-ink-muted">cố định</span>
+                            ) : null}
+                          </label>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                  <div className="mt-1.5 border-t border-line pt-1.5">
+                    <button
+                      type="button"
+                      className="btn-ghost btn-sm w-full justify-center text-ink-soft"
+                      onClick={resetColumns}
+                    >
+                      Hiện tất cả
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
       </div>
@@ -304,6 +422,7 @@ export function ProfilesPage(): JSX.Element {
           profiles={profiles}
           groups={groups}
           selectedIds={selectedIds}
+          visibleColumns={visibleColumns}
           onToggle={toggleSelect}
           onSelectAll={() => {
             const allSelected = profiles.every((p) => selectedIds.has(p.id))
@@ -312,7 +431,7 @@ export function ProfilesPage(): JSX.Element {
           }}
           onLaunch={(id) => void handleLaunch([id])}
           onStop={(id) => void handleStop([id])}
-          onClearGmail={(id) => void handleClearGmail(id)}
+          onWipe={(id) => void handleWipeProfile(id)}
           onToggleRestore={(groupId, enabled) =>
             void updateGroup(groupId, { restoreLastSession: enabled })
           }

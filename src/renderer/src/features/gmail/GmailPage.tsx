@@ -68,6 +68,8 @@ export function GmailPage(): JSX.Element {
   const [formFillEnabled, setFormFillEnabled] = useState(DEFAULT_GMAIL_POST_SETUP.formFillEnabled)
   const [formTitle, setFormTitle] = useState('')
   const [formDescription, setFormDescription] = useState('')
+  const [formHeaderPath, setFormHeaderPath] = useState('')
+  const [formHeaderPreview, setFormHeaderPreview] = useState<ImagePreview | null>(null)
   const [savingSetup, setSavingSetup] = useState(false)
   const stopRef = useRef(false)
   const logSeq = useRef(0)
@@ -77,6 +79,21 @@ export function GmailPage(): JSX.Element {
     const id = `${Date.now()}-${logSeq.current}`
     setLogs((prev) => [...prev, { id, tone, text }])
   }
+
+  useEffect(() => {
+    return window.api.profiles.onLoginProgress((p) => {
+      logSeq.current += 1
+      const id = `${Date.now()}-${logSeq.current}`
+      setLogs((prev) => [
+        ...prev,
+        {
+          id,
+          tone: p.tone,
+          text: `${p.email} → ${p.profileName}: ${p.step}`
+        }
+      ])
+    })
+  }, [])
 
   async function reloadProfiles(): Promise<ChromeProfile[]> {
     const all = await window.api.profiles.list()
@@ -184,10 +201,16 @@ export function GmailPage(): JSX.Element {
       setFormFillEnabled(Boolean(setup.formFillEnabled))
       setFormTitle(setup.formTitle || '')
       setFormDescription(setup.formDescription || '')
-      if (setup.avatarPath || setup.appsScriptPath || setup.appsScriptCode.trim()) {
+      setFormHeaderPath(setup.formHeaderPath || '')
+      if (
+        setup.avatarPath ||
+        setup.appsScriptPath ||
+        setup.appsScriptCode.trim() ||
+        setup.formHeaderPath
+      ) {
         pushLog(
           'info',
-          `Đã tải cấu hình post-login (ảnh: ${setup.avatarPath ? 'có' : 'chưa'} · script: ${setup.appsScriptPath || (setup.appsScriptCode.trim() ? 'inline cũ' : 'chưa')} · form: ${setup.formFillEnabled ? 'bật' : 'tắt'}).`
+          `Đã tải cấu hình post-login (ảnh: ${setup.avatarPath ? 'có' : 'chưa'} · header Form: ${setup.formHeaderPath ? 'có' : 'chưa'} · script: ${setup.appsScriptPath || (setup.appsScriptCode.trim() ? 'inline cũ' : 'chưa')} · form: ${setup.formFillEnabled ? 'bật' : 'tắt'}).`
         )
       }
     } catch {
@@ -206,7 +229,8 @@ export function GmailPage(): JSX.Element {
         appsScriptCode: '',
         formFillEnabled,
         formTitle,
-        formDescription
+        formDescription,
+        formHeaderPath
       })
       setAvatarPath(result.config.avatarPath)
       setAppsScriptPath(result.config.appsScriptPath)
@@ -214,6 +238,7 @@ export function GmailPage(): JSX.Element {
       setFormFillEnabled(result.config.formFillEnabled)
       setFormTitle(result.config.formTitle)
       setFormDescription(result.config.formDescription)
+      setFormHeaderPath(result.config.formHeaderPath)
       pushLog('success', `Đã lưu cấu hình post-login → ${result.path}`)
     } catch (error) {
       pushLog(
@@ -236,6 +261,20 @@ export function GmailPage(): JSX.Element {
       preview?.exists
         ? `Đã chọn ảnh đại diện: ${path}`
         : `Ảnh không đọc được: ${path}`
+    )
+  }
+
+  async function pickFormHeader(): Promise<void> {
+    const path = await window.api.profiles.pickImageFile()
+    if (!path) return
+    setFormHeaderPath(path)
+    const preview = await window.api.profiles.readImagePreview(path).catch(() => null)
+    setFormHeaderPreview(preview)
+    pushLog(
+      preview?.exists ? 'info' : 'warn',
+      preview?.exists
+        ? `Đã chọn ảnh header Form: ${path}`
+        : `Ảnh header Form không đọc được: ${path}`
     )
   }
 
@@ -275,6 +314,29 @@ export function GmailPage(): JSX.Element {
       clearTimeout(timer)
     }
   }, [avatarPath])
+
+  useEffect(() => {
+    const path = formHeaderPath.trim()
+    if (!path) {
+      setFormHeaderPreview(null)
+      return
+    }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void window.api.profiles
+        .readImagePreview(path)
+        .then((preview) => {
+          if (!cancelled) setFormHeaderPreview(preview)
+        })
+        .catch(() => {
+          if (!cancelled) setFormHeaderPreview(null)
+        })
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [formHeaderPath])
 
   async function saveList(): Promise<void> {
     if (savingList) return
@@ -445,7 +507,7 @@ export function GmailPage(): JSX.Element {
       `[Luồng] ${index + 1}/${total}: ${gmail.email} → ${profile.name}` +
         (staggerMs > 0 ? ` · trễ ${Math.round(staggerMs / 1000)}s` : '') +
         (postSetupEnabled
-          ? ` · post-setup ON (ảnh: ${avatarPath ? 'có' : 'không'} · script: ${appsScriptPath ? 'có' : 'không'} · form: ${formFillEnabled ? 'điền' : 'không'})`
+          ? ` · post-setup ON (ảnh: ${avatarPath ? 'có' : 'không'} · header: ${formHeaderPath ? 'có' : 'không'} · script: ${appsScriptPath ? 'có' : 'không'} · form: ${formFillEnabled ? 'điền' : 'không'})`
           : ' · post-setup OFF')
     )
 
@@ -476,7 +538,8 @@ export function GmailPage(): JSX.Element {
             appsScriptCode: '',
             formFillEnabled,
             formTitle,
-            formDescription
+            formDescription,
+            formHeaderPath
           })
           .catch(() => undefined)
       }
@@ -492,7 +555,8 @@ export function GmailPage(): JSX.Element {
         appsScriptPath: appsScriptPath || undefined,
         formFillEnabled,
         formTitle: formTitle || undefined,
-        formDescription: formDescription || undefined
+        formDescription: formDescription || undefined,
+        formHeaderPath: formHeaderPath || undefined
       })
 
       if (result.success) {
@@ -657,7 +721,8 @@ export function GmailPage(): JSX.Element {
         appsScriptCode: '',
         formFillEnabled,
         formTitle,
-        formDescription
+        formDescription,
+        formHeaderPath
       })
     } catch {
       // ignore
@@ -739,13 +804,13 @@ export function GmailPage(): JSX.Element {
 
         pushLog(
           'info',
-          `Mở ${batch.length} Chrome chia lưới (mỗi luồng lệch ~1.2s): ${batch
+          `Mở ${batch.length} Chrome chia lưới (mỗi luồng lệch ~2.8s): ${batch
             .map((b) => `${b.gmail.email}→${b.profile.name}`)
             .join(', ')}`
         )
 
-        // Stagger: mỗi Chrome khởi động lệch nhau để thao tác không đồng bộ / dễ nhầm
-        const STAGGER_MS = 1200
+        // Stagger: mỗi Chrome lệch nhau nhiều hơn — tránh thao tác đồng bộ (dễ bị coi bot)
+        const STAGGER_MS = 2800
         const results = await Promise.all(
           batch.map((item, i) => processOne(item, queue.length, i * STAGGER_MS))
         )
@@ -1019,8 +1084,8 @@ export function GmailPage(): JSX.Element {
               <div>
                 <h2 className="font-display text-base font-semibold text-ink">Sau khi login</h2>
                 <p className="mt-0.5 text-xs text-ink-muted">
-                  Đổi ảnh → Sheet → Form → Apps Script (tùy chọn). Sau login luôn mở 2fa.live với
-                  cột 3.
+                  Login OK là đã gán mail vào profile → mở 2fa.live (cột 3). Tùy chọn thêm: Đổi
+                  ảnh → Sheet → Form (tiêu đề/mô tả/header) → Publish lấy link → Apps Script.
                 </p>
               </div>
               <label className="flex items-center gap-2 text-sm text-ink-soft">
@@ -1116,6 +1181,11 @@ export function GmailPage(): JSX.Element {
                     </button>
                   ) : null}
                 </div>
+                <p className="mt-1 text-[11px] text-ink-muted">
+                  Trong file có thể dùng <code className="font-mono">[LINK_SHEET]</code> và{' '}
+                  <code className="font-mono">[LINK_FORM]</code> — app sẽ thay bằng URL Sheet /
+                  Form (sau Publish).
+                </p>
               </div>
 
               <div className="rounded-xl border border-line bg-surface-muted/40 p-3">
@@ -1123,7 +1193,7 @@ export function GmailPage(): JSX.Element {
                   <div>
                     <div className="text-sm font-medium text-ink">Nội dung Google Form</div>
                     <p className="mt-0.5 text-[11px] text-ink-muted">
-                      Sau khi mở tab Form, điền tiêu đề và mô tả nếu bật.
+                      Sau khi mở tab Form: điền tiêu đề/mô tả (nếu bật) và upload ảnh header.
                     </p>
                   </div>
                   <label className="flex items-center gap-2 text-sm text-ink-soft">
@@ -1136,31 +1206,93 @@ export function GmailPage(): JSX.Element {
                     Bật điền Form
                   </label>
                 </div>
-                <div
-                  className={cn(
-                    'grid gap-3 transition',
-                    !formFillEnabled && 'pointer-events-none opacity-50'
-                  )}
-                >
-                  <div>
-                    <label className="label">Untitled form</label>
-                    <input
-                      className="input text-sm"
-                      disabled={running || !postSetupEnabled || !formFillEnabled}
-                      value={formTitle}
-                      onChange={(e) => setFormTitle(e.target.value)}
-                      placeholder="Tiêu đề form"
-                    />
+                <div className="space-y-3">
+                  <div
+                    className={cn(
+                      'grid gap-3 transition',
+                      !formFillEnabled && 'pointer-events-none opacity-50'
+                    )}
+                  >
+                    <div>
+                      <label className="label">Untitled form</label>
+                      <input
+                        className="input text-sm"
+                        disabled={running || !postSetupEnabled || !formFillEnabled}
+                        value={formTitle}
+                        onChange={(e) => setFormTitle(e.target.value)}
+                        placeholder="Tiêu đề form"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Form description</label>
+                      <textarea
+                        className="input min-h-[72px] text-sm leading-5"
+                        disabled={running || !postSetupEnabled || !formFillEnabled}
+                        value={formDescription}
+                        onChange={(e) => setFormDescription(e.target.value)}
+                        placeholder="Mô tả form"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="label">Form description</label>
-                    <textarea
-                      className="input min-h-[72px] text-sm leading-5"
-                      disabled={running || !postSetupEnabled || !formFillEnabled}
-                      value={formDescription}
-                      onChange={(e) => setFormDescription(e.target.value)}
-                      placeholder="Mô tả form"
-                    />
+
+                  <div className="grid gap-3 border-t border-line pt-3 md:grid-cols-[auto_1fr]">
+                    <div className="flex h-16 w-28 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-line bg-surface-muted text-ink-muted">
+                      {formHeaderPreview?.dataUrl ? (
+                        <img
+                          src={formHeaderPreview.dataUrl}
+                          alt="Ảnh header Form"
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <ImagePlus size={18} />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <label className="label">Ảnh header Form</label>
+                      <div className="flex gap-2">
+                        <input
+                          className="input font-mono text-xs"
+                          disabled={running || !postSetupEnabled}
+                          value={formHeaderPath}
+                          onChange={(e) => setFormHeaderPath(e.target.value)}
+                          placeholder="D:\images\form-header.jpg"
+                        />
+                        <button
+                          type="button"
+                          className="btn-secondary shrink-0 !py-2"
+                          disabled={running || !postSetupEnabled}
+                          onClick={() => void pickFormHeader()}
+                        >
+                          <ImagePlus size={14} />
+                          Chọn
+                        </button>
+                        {formHeaderPath ? (
+                          <button
+                            type="button"
+                            className="btn-ghost shrink-0 !px-2 !py-2 text-danger"
+                            disabled={running || !postSetupEnabled}
+                            onClick={() => setFormHeaderPath('')}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 text-[11px]">
+                        {!formHeaderPath.trim() ? (
+                          <span className="text-ink-muted">
+                            Chưa chọn — bỏ qua upload header (Customize theme → Header).
+                          </span>
+                        ) : formHeaderPreview?.exists ? (
+                          <span className="text-ink-muted">
+                            {formHeaderPreview.name} ·{' '}
+                            {Math.max(1, Math.round(formHeaderPreview.size / 1024))} KB · nên tỉ lệ
+                            ~4:1
+                          </span>
+                        ) : (
+                          <span className="text-danger">Không tìm thấy file ảnh ở đường dẫn này.</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1294,7 +1426,7 @@ export function GmailPage(): JSX.Element {
             {logs.length === 0 ? (
               <div className="text-sm text-ink-muted">Chưa chạy lần nào.</div>
             ) : (
-              <ul className="max-h-72 space-y-1 overflow-auto text-xs">
+              <ul className="max-h-[28rem] space-y-1 overflow-auto text-xs">
                 {logs.map((log) => (
                   <li
                     key={log.id}

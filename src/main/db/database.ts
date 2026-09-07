@@ -465,6 +465,31 @@ export class Database {
     }
   }
 
+  /**
+   * Xóa sạch hồ sơ như mới tạo: gỡ Gmail, xóa thư mục Chrome data rồi tạo lại trống.
+   * Giữ id / tên / nhóm / proxy / UA / ghi chú.
+   */
+  resetProfile(id: string): ChromeProfile {
+    const index = this.data.profiles.findIndex((p) => p.id === id)
+    if (index < 0) throw new Error('Không tìm thấy hồ sơ')
+    const current = this.data.profiles[index]
+
+    this.safeRemoveDataDir(current.dataDir)
+    mkdirSync(current.dataDir, { recursive: true })
+
+    const updated: ChromeProfile = {
+      ...this.normalizeProfile(current),
+      gmail: null,
+      autoLoginGmail: false,
+      status: 'idle',
+      lastLaunchedAt: null,
+      updatedAt: new Date().toISOString()
+    }
+    this.data.profiles[index] = updated
+    this.persist()
+    return updated
+  }
+
   private safeRemoveDataDir(dataDir: string): void {
     try {
       const root = resolve(this.data.settings.profilesRoot)

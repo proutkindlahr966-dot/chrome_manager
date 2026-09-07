@@ -165,6 +165,8 @@ export interface GmailLoginOptions {
   formFillEnabled?: boolean
   formTitle?: string
   formDescription?: string
+  /** Ảnh header Google Form (upload qua Customize theme) */
+  formHeaderPath?: string
 }
 
 export interface GmailPostSetupConfig {
@@ -180,6 +182,8 @@ export interface GmailPostSetupConfig {
   formTitle: string
   /** Mô tả form (Form description) */
   formDescription: string
+  /** Ảnh header Form (Customize theme → Header → Upload) */
+  formHeaderPath: string
 }
 
 export const DEFAULT_GMAIL_POST_SETUP: GmailPostSetupConfig = {
@@ -189,7 +193,8 @@ export const DEFAULT_GMAIL_POST_SETUP: GmailPostSetupConfig = {
   appsScriptCode: '',
   formFillEnabled: false,
   formTitle: '',
-  formDescription: ''
+  formDescription: '',
+  formHeaderPath: ''
 }
 
 /** Xem trước ảnh trong renderer — dataUrl rỗng khi file quá lớn */
@@ -221,6 +226,16 @@ export interface GmailLoginResult {
   success: boolean
   message?: string
   error?: string
+}
+
+/** Tiến trình từng bước login Gmail — dùng khi chạy nhiều luồng song song */
+export interface GmailLoginProgress {
+  profileId: string
+  profileName: string
+  email: string
+  step: string
+  tone: 'info' | 'success' | 'warn' | 'error'
+  at: string
 }
 
 export interface BulkResult {

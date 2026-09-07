@@ -42,6 +42,7 @@ interface AppState {
   createProfiles: (input: BulkCreateProfileInput) => Promise<ChromeProfile[]>
   updateProfile: (id: string, input: UpdateProfileInput) => Promise<void>
   deleteProfiles: (ids: string[]) => Promise<void>
+  resetProfile: (id: string) => Promise<void>
   duplicateProfile: (id: string) => Promise<void>
   launchProfiles: (ids: string[]) => Promise<BulkResult>
   stopProfiles: (ids: string[]) => Promise<BulkResult>
@@ -161,6 +162,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (ids.length === 1) await window.api.profiles.remove(ids[0])
     else await window.api.profiles.bulkDelete(ids)
     get().clearSelection()
+    await get().refreshAll()
+  },
+
+  resetProfile: async (id) => {
+    await window.api.profiles.reset(id)
     await get().refreshAll()
   },
 

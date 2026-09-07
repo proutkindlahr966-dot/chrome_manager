@@ -24,6 +24,8 @@ export function Modal({
   const titleId = useId()
   const descId = useId()
   const panelRef = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return
@@ -33,7 +35,7 @@ export function Modal({
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.preventDefault()
-        onClose()
+        onCloseRef.current()
       }
       if (e.key !== 'Tab' || !panelRef.current) return
       const focusable = panelRef.current.querySelectorAll<HTMLElement>(
@@ -56,7 +58,7 @@ export function Modal({
       window.removeEventListener('keydown', onKey)
       prev?.focus?.()
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 

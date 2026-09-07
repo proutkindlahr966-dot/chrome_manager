@@ -88,6 +88,13 @@ export function registerIpcHandlers(): void {
     return true
   })
 
+  ipcMain.handle(IPC.PROFILES_RESET, async (_e, id: string) => {
+    await stopProfile(id)
+    // Windows: chờ Chrome nhả khóa file trong user-data-dir
+    await new Promise((r) => setTimeout(r, 600))
+    return db.resetProfile(id)
+  })
+
   ipcMain.handle(IPC.PROFILES_DUPLICATE, (_e, id: string) => db.duplicateProfile(id))
 
   ipcMain.handle(IPC.PROFILES_BULK_DELETE, async (_e, ids: string[]) => {

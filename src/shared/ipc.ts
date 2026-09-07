@@ -6,6 +6,7 @@ export const IPC = {
   PROFILES_BULK_CREATE: 'profiles:bulkCreate',
   PROFILES_UPDATE: 'profiles:update',
   PROFILES_DELETE: 'profiles:delete',
+  PROFILES_RESET: 'profiles:reset',
   PROFILES_DUPLICATE: 'profiles:duplicate',
   PROFILES_BULK_DELETE: 'profiles:bulkDelete',
   PROFILES_BULK_UPDATE: 'profiles:bulkUpdate',
@@ -20,6 +21,7 @@ export const IPC = {
   PROFILES_TILE_LAYOUT: 'profiles:tileLayout',
   PROFILES_ARRANGE_WINDOWS: 'profiles:arrangeWindows',
   PROFILE_STATUS_CHANGED: 'profiles:statusChanged',
+  GMAIL_LOGIN_PROGRESS: 'gmail:loginProgress',
 
   // Gmail list file
   GMAIL_LIST_LOAD: 'gmailList:load',

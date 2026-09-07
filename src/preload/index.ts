@@ -10,6 +10,7 @@ import type {
   DashboardStats,
   GmailLoginResult,
   GmailLoginOptions,
+  GmailLoginProgress,
   GmailPostSetupConfig,
   ImagePreview,
   LaunchResult,
@@ -33,6 +34,7 @@ const api = {
     update: (id: string, input: UpdateProfileInput): Promise<ChromeProfile> =>
       ipcRenderer.invoke(IPC.PROFILES_UPDATE, id, input),
     remove: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.PROFILES_DELETE, id),
+    reset: (id: string): Promise<ChromeProfile> => ipcRenderer.invoke(IPC.PROFILES_RESET, id),
     duplicate: (id: string): Promise<ChromeProfile> =>
       ipcRenderer.invoke(IPC.PROFILES_DUPLICATE, id),
     bulkDelete: (ids: string[]): Promise<BulkResult> =>
@@ -75,6 +77,12 @@ const api = {
         cb(patch)
       ipcRenderer.on(IPC.PROFILE_STATUS_CHANGED, listener)
       return () => ipcRenderer.removeListener(IPC.PROFILE_STATUS_CHANGED, listener)
+    },
+    onLoginProgress: (cb: (progress: GmailLoginProgress) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress: GmailLoginProgress): void =>
+        cb(progress)
+      ipcRenderer.on(IPC.GMAIL_LOGIN_PROGRESS, listener)
+      return () => ipcRenderer.removeListener(IPC.GMAIL_LOGIN_PROGRESS, listener)
     }
   },
   groups: {

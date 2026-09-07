@@ -8,6 +8,7 @@ import type {
   DashboardStats,
   GmailLoginResult,
   GmailLoginOptions,
+  GmailLoginProgress,
   GmailPostSetupConfig,
   ImagePreview,
   LaunchResult,
@@ -27,6 +28,7 @@ export interface AppApi {
     bulkCreate: (input: BulkCreateProfileInput) => Promise<ChromeProfile[]>
     update: (id: string, input: UpdateProfileInput) => Promise<ChromeProfile>
     remove: (id: string) => Promise<boolean>
+    reset: (id: string) => Promise<ChromeProfile>
     duplicate: (id: string) => Promise<ChromeProfile>
     bulkDelete: (ids: string[]) => Promise<BulkResult>
     bulkUpdate: (ids: string[], input: UpdateProfileInput) => Promise<BulkResult>
@@ -50,6 +52,7 @@ export interface AppApi {
     readImagePreview: (path: string) => Promise<ImagePreview>
     pickScriptTextFile: () => Promise<string | null>
     onStatusChanged: (cb: (patch: ProfileStatusPatch) => void) => () => void
+    onLoginProgress: (cb: (progress: GmailLoginProgress) => void) => () => void
   }
   groups: {
     list: () => Promise<ProfileGroup[]>
