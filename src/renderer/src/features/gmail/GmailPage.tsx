@@ -27,6 +27,7 @@ import {
   loadSavedThreads,
   persistThreads
 } from './threads'
+import { loadSavedMailKind, persistMailKind, type GmailMailKind } from './mail-kind'
 
 interface RunLogItem {
   id: string
@@ -37,7 +38,10 @@ interface RunLogItem {
 interface WorkItem {
   profile: ChromeProfile
   gmail: GmailCredentials
+  /** Index trong batch / hàng đợi (0-based) */
   index: number
+  /** Số dòng 1-based trong danh sách Gmail (mail mới) */
+  listLine?: number
   windowBounds?: WindowBounds
 }
 
@@ -56,6 +60,7 @@ export function GmailPage(): JSX.Element {
   const [listText, setListText] = useState('')
   const [autoLoginFlag, setAutoLoginFlag] = useState(true)
   const [threadsInput, setThreadsInput] = useState(() => String(loadSavedThreads()))
+  const [mailKind, setMailKind] = useState<GmailMailKind>(() => loadSavedMailKind())
   const [running, setRunning] = useState(false)
   const [logs, setLogs] = useState<RunLogItem[]>([])
   const [allProfiles, setAllProfiles] = useState<ChromeProfile[]>([])
@@ -73,6 +78,8 @@ export function GmailPage(): JSX.Element {
   const [savingSetup, setSavingSetup] = useState(false)
   const stopRef = useRef(false)
   const logSeq = useRef(0)
+  /** Mail mới: email → số dòng trong list (để gắn vào log progress) */
+  const lineByEmailRef = useRef<Map<string, number>>(new Map())
 
   function pushLog(tone: RunLogItem['tone'], text: string): void {
     logSeq.current += 1
@@ -84,12 +91,14 @@ export function GmailPage(): JSX.Element {
     return window.api.profiles.onLoginProgress((p) => {
       logSeq.current += 1
       const id = `${Date.now()}-${logSeq.current}`
+      const line = lineByEmailRef.current.get(normalizeEmailKey(p.email))
+      const prefix = line ? `Dòng ${line} · ` : ''
       setLogs((prev) => [
         ...prev,
         {
           id,
           tone: p.tone,
-          text: `${p.email} → ${p.profileName}: ${p.step}`
+          text: `${prefix}${p.email} → ${p.profileName}: ${p.step}`
         }
       ])
     })
@@ -438,7 +447,76 @@ export function GmailPage(): JSX.Element {
     () => groupProfiles.filter((p) => hasGmailCredentials(p.gmail)),
     [groupProfiles]
   )
-  const willUse = Math.min(emptySlots.length, availableQueue.length)
+
+  /**
+   * Mail mới: ghép 1–1 cố định — profile[i] ↔ dòng i (không thay khi lỗi).
+   * Mail cũ: lần đầu cũng N dòng = N profile trống; lỗi thì lấy dòng tiếp theo thay thế.
+   */
+  const newMailPairs = useMemo(() => {
+    if (mailKind !== 'new') return [] as Array<{
+      profile: ChromeProfile
+      gmail: GmailCredentials
+      listLine: number
+      pairIndex: number
+    }>
+    const count = Math.min(groupProfiles.length, availableQueue.length)
+    const pairs: Array<{
+      profile: ChromeProfile
+      gmail: GmailCredentials
+      listLine: number
+      pairIndex: number
+    }> = []
+    for (let i = 0; i < count; i++) {
+      const gmail = availableQueue[i]
+      const listLine =
+        gmailQueue.findIndex(
+          (g) => normalizeEmailKey(g.email) === normalizeEmailKey(gmail.email)
+        ) + 1
+      pairs.push({
+        profile: groupProfiles[i],
+        gmail,
+        listLine: listLine > 0 ? listLine : i + 1,
+        pairIndex: i
+      })
+    }
+    return pairs
+  }, [mailKind, groupProfiles, availableQueue, gmailQueue])
+
+  /** Mail cũ — ánh xạ lần đầu (preview): slot trống[i] ↔ mail[i] */
+  const oldMailInitialPairs = useMemo(() => {
+    if (mailKind !== 'old') return [] as Array<{
+      profile: ChromeProfile
+      gmail: GmailCredentials
+      listLine: number
+      pairIndex: number
+    }>
+    const count = Math.min(emptySlots.length, availableQueue.length)
+    const pairs: Array<{
+      profile: ChromeProfile
+      gmail: GmailCredentials
+      listLine: number
+      pairIndex: number
+    }> = []
+    for (let i = 0; i < count; i++) {
+      const gmail = availableQueue[i]
+      const listLine =
+        gmailQueue.findIndex(
+          (g) => normalizeEmailKey(g.email) === normalizeEmailKey(gmail.email)
+        ) + 1
+      pairs.push({
+        profile: emptySlots[i],
+        gmail,
+        listLine: listLine > 0 ? listLine : i + 1,
+        pairIndex: i
+      })
+    }
+    return pairs
+  }, [mailKind, emptySlots, availableQueue, gmailQueue])
+
+  const willUse =
+    mailKind === 'new'
+      ? newMailPairs.length
+      : oldMailInitialPairs.length
   const safeThreads = clampThreads(Number(threadsInput) || THREADS_MIN)
   const parallelNow = Math.min(safeThreads, willUse)
 
@@ -498,13 +576,15 @@ export function GmailPage(): JSX.Element {
     isRobot?: boolean
     alreadyUsed?: boolean
   }> {
-    const { profile, gmail, index, windowBounds } = item
+    const { profile, gmail, index, listLine, windowBounds } = item
     if (staggerMs > 0) {
       await new Promise((r) => setTimeout(r, staggerMs))
     }
     pushLog(
       'info',
-      `[Luồng] ${index + 1}/${total}: ${gmail.email} → ${profile.name}` +
+      `[Luồng] ${index + 1}/${total}` +
+        (listLine ? ` · dòng ${listLine}` : '') +
+        `: ${gmail.email} → ${profile.name}` +
         (staggerMs > 0 ? ` · trễ ${Math.round(staggerMs / 1000)}s` : '') +
         (postSetupEnabled
           ? ` · post-setup ON (ảnh: ${avatarPath ? 'có' : 'không'} · header: ${formHeaderPath ? 'có' : 'không'} · script: ${appsScriptPath ? 'có' : 'không'} · form: ${formFillEnabled ? 'điền' : 'không'})`
@@ -512,6 +592,21 @@ export function GmailPage(): JSX.Element {
     )
 
     try {
+      // Mail mới: profile đã có Gmail → bỏ qua cặp dòng này (giữ 1–1 theo index)
+      if (mailKind === 'new' && hasGmailCredentials(profile.gmail)) {
+        pushLog(
+          'warn',
+          `Dòng ${listLine ?? index + 1}: bỏ qua ${gmail.email} — ${profile.name} đã có mail (${profile.gmail?.email}).`
+        )
+        return {
+          email: gmail.email,
+          filled: false,
+          skipped: true,
+          isRobot: false,
+          alreadyUsed: true
+        }
+      }
+
       // Chặn sớm nếu mail đã gắn profile khác
       const latest = await reloadProfiles()
       const conflict = latest.find(
@@ -523,7 +618,7 @@ export function GmailPage(): JSX.Element {
       if (conflict) {
         pushLog(
           'warn',
-          `Bỏ qua ${gmail.email} — đã gắn hồ sơ "${conflict.name}" (mọi nhóm, 1 mail = 1 profile).`
+          `${listLine ? `Dòng ${listLine}: ` : ''}Bỏ qua ${gmail.email} — đã gắn hồ sơ "${conflict.name}" (mọi nhóm, 1 mail = 1 profile).`
         )
         return { email: gmail.email, filled: false, skipped: true, isRobot: false, alreadyUsed: true }
       }
@@ -549,6 +644,7 @@ export function GmailPage(): JSX.Element {
         windowBounds,
         credentials: gmail,
         autoLoginGmail: autoLoginFlag,
+        mailKind,
         preferExistingSession: false,
         postLoginSetup: postSetupEnabled,
         avatarPath: avatarPath || undefined,
@@ -572,7 +668,8 @@ export function GmailPage(): JSX.Element {
         }
         pushLog(
           'success',
-          result.message || `OK & đã lưu hồ sơ: ${profile.name} ← ${gmail.email}`
+          (listLine ? `Dòng ${listLine}: ` : '') +
+            (result.message || `OK & đã lưu hồ sơ: ${profile.name} ← ${gmail.email}`)
         )
         return { email: gmail.email, filled: true, skipped: false }
       }
@@ -628,38 +725,39 @@ export function GmailPage(): JSX.Element {
       }
 
       // Không đụng Gmail trên hồ sơ khi lỗi (chưa từng lưu)
+      const linePrefix = listLine ? `Dòng ${listLine} · ` : ''
       if (isRobot) {
         pushLog(
           'error',
-          `Mail lỗi (${gmail.email}) — Confirm you’re not a robot. Đã ghi vào danh sách "Xóa mail lỗi".`
+          `${linePrefix}Mail lỗi (${gmail.email}) — Confirm you’re not a robot. Đã ghi vào danh sách "Xóa mail lỗi".`
         )
       } else if (passwordChanged) {
         pushLog(
           'error',
-          `Mail lỗi (${gmail.email}) — Your password was changed (mật khẩu đã bị đổi). Đã ghi vào danh sách "Xóa mail lỗi".`
+          `${linePrefix}Mail lỗi (${gmail.email}) — Your password was changed (mật khẩu đã bị đổi). Đã ghi vào danh sách "Xóa mail lỗi".`
         )
       } else if (missing2faSecret) {
         pushLog(
           'error',
-          `Mail lỗi (${gmail.email}) — Thiếu mã 2FA 6 số (cột 3 sau mail|pass|). ${err.replace(/^\[BỎ QUA\]\s*/i, '')}`
+          `${linePrefix}Mail lỗi (${gmail.email}) — Thiếu mã 2FA 6 số (cột 3 sau mail|pass|). ${err.replace(/^\[BỎ QUA\]\s*/i, '')}`
         )
       } else if (totpInputFailed) {
         pushLog(
           'error',
-          `Mail lỗi (${gmail.email}) — Không nhập/nộp được mã Authenticator. ${err.replace(/^\[BỎ QUA\]\s*/i, '')}`
+          `${linePrefix}Mail lỗi (${gmail.email}) — Không nhập/nộp được mã Authenticator. ${err.replace(/^\[BỎ QUA\]\s*/i, '')}`
         )
       } else if (incorrect2fa) {
         pushLog(
           'error',
-          `Mail lỗi (${gmail.email}) — Mã 2FA không chính xác (Google từ chối mã đã nộp). Đã ghi log & bỏ qua.`
+          `${linePrefix}Mail lỗi (${gmail.email}) — Mã 2FA không chính xác (Google từ chối mã đã nộp). Đã ghi log & bỏ qua.`
         )
       } else if (skipped) {
         pushLog(
           'error',
-          `Mail lỗi / bỏ qua (${gmail.email}) trên ${profile.name}: ${err.replace(/^\[BỎ QUA\]\s*/i, '')}`
+          `${linePrefix}Mail lỗi / bỏ qua (${gmail.email}) trên ${profile.name}: ${err.replace(/^\[BỎ QUA\]\s*/i, '')}`
         )
       } else {
-        pushLog('error', `Mail lỗi (${gmail.email} → ${profile.name}): ${err}`)
+        pushLog('error', `${linePrefix}Mail lỗi (${gmail.email} → ${profile.name}): ${err}`)
       }
 
       markEmailFailed(gmail.email)
@@ -667,7 +765,7 @@ export function GmailPage(): JSX.Element {
       return { email: gmail.email, filled: false, skipped, isRobot }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Không rõ'
-      pushLog('error', `Mail lỗi ${gmail.email}: ${msg}`)
+      pushLog('error', `${listLine ? `Dòng ${listLine} · ` : ''}Mail lỗi ${gmail.email}: ${msg}`)
       markEmailFailed(gmail.email)
       return { email: gmail.email, filled: false, skipped: false, isRobot: false }
     }
@@ -687,16 +785,35 @@ export function GmailPage(): JSX.Element {
       })
       return
     }
-    if (emptySlots.length === 0) {
-      toast({ tone: 'info', title: 'Nhóm đã đầy (mọi hồ sơ đều đã có Gmail).' })
-      return
-    }
     if (gmailQueue.length === 0) {
       toast({
         tone: 'warning',
         title: 'Danh sách Gmail trống',
         description: 'Dán mỗi dòng: mail|pass|2fa (cột 3 = mã 6 số)'
       })
+      return
+    }
+
+    if (mailKind === 'new') {
+      if (availableQueue.length === 0) {
+        toast({
+          tone: 'warning',
+          title: 'Không còn mail mới để đăng nhập',
+          description: 'Mọi mail trong danh sách đã được gắn ở hồ sơ khác.'
+        })
+        return
+      }
+      if (newMailPairs.length === 0) {
+        toast({ tone: 'info', title: 'Không có cặp profile ↔ dòng mail để chạy.' })
+        return
+      }
+      await runNewMailParallel()
+      return
+    }
+
+    // —— Mail cũ ——
+    if (emptySlots.length === 0) {
+      toast({ tone: 'info', title: 'Nhóm đã đầy (mọi hồ sơ đều đã có Gmail).' })
       return
     }
     if (availableQueue.length === 0) {
@@ -707,12 +824,264 @@ export function GmailPage(): JSX.Element {
       })
       return
     }
+    if (oldMailInitialPairs.length === 0) {
+      toast({ tone: 'info', title: 'Không có cặp profile ↔ dòng mail để chạy.' })
+      return
+    }
+    await runOldMailParallel()
+  }
 
+  /**
+   * Mail cũ:
+   * - Chia theo số luồng: mỗi đợt N profile.
+   * - Trong đợt: lỗi → thay mail, chạy lại CÙNG các profile đó đến khi cả đợt thành công (hoặc hết mail).
+   * - Xong hết đợt mới sang N profile tiếp theo.
+   */
+  async function runOldMailParallel(): Promise<void> {
     stopRef.current = false
     setRunning(true)
     setLogs([])
 
-    // Lưu cấu hình post-login trước khi chạy
+    try {
+      await window.api.profiles.saveGmailSetup({
+        enabled: postSetupEnabled,
+        avatarPath,
+        appsScriptPath,
+        appsScriptCode: '',
+        formFillEnabled,
+        formTitle,
+        formDescription,
+        formHeaderPath
+      })
+    } catch {
+      // ignore
+    }
+
+    const claimedEmails = new Set(usedEmailsGlobal)
+    const queue = [...availableQueue]
+    let queuePos = 0
+
+    function lineOf(gmail: GmailCredentials): number {
+      const idx = gmailQueue.findIndex(
+        (g) => normalizeEmailKey(g.email) === normalizeEmailKey(gmail.email)
+      )
+      return idx >= 0 ? idx + 1 : 0
+    }
+
+    function takeNextMail(): { gmail: GmailCredentials; listLine: number } | null {
+      while (queuePos < queue.length) {
+        const gmail = queue[queuePos]
+        queuePos += 1
+        const key = normalizeEmailKey(gmail.email)
+        if (!key || claimedEmails.has(key)) {
+          pushLog('warn', `Bỏ qua ${gmail.email} — đã gắn / đã dùng trong phiên này.`)
+          continue
+        }
+        claimedEmails.add(key)
+        const listLine = lineOf(gmail) || queuePos
+        lineByEmailRef.current.set(key, listLine)
+        return { gmail, listLine }
+      }
+      return null
+    }
+
+    type SlotState = {
+      profile: ChromeProfile
+      gmail: GmailCredentials
+      listLine: number
+      attempt: number
+    }
+
+    const allTargets = [...emptySlots]
+    const successEmails: string[] = []
+    const runFailed: string[] = []
+    let filledNow = 0
+    let wave = 0
+
+    pushLog(
+      'info',
+      `Mail cũ · ${allTargets.length} profile trống · ${queue.length} mail · ${safeThreads} luồng/đợt. Mỗi đợt phải xong hết (thay mail lỗi) mới sang đợt sau.`
+    )
+
+    try {
+      let offset = 0
+      while (!stopRef.current && offset < allTargets.length) {
+        const waveProfiles = allTargets.slice(offset, offset + safeThreads)
+        offset += waveProfiles.length
+        wave += 1
+
+        // Gán mail lần đầu cho cả đợt
+        let pending: SlotState[] = []
+        for (const profile of waveProfiles) {
+          const next = takeNextMail()
+          if (!next) {
+            pushLog('warn', `${profile.name}: hết mail — bỏ qua trong đợt ${wave}.`)
+            continue
+          }
+          pending.push({
+            profile,
+            gmail: next.gmail,
+            listLine: next.listLine,
+            attempt: 1
+          })
+          pushLog(
+            'info',
+            `Đợt ${wave} · dòng ${next.listLine}: ${next.gmail.email} → ${profile.name}`
+          )
+        }
+
+        if (pending.length === 0) {
+          pushLog('warn', `Đợt ${wave}: không còn mail để chạy.`)
+          break
+        }
+
+        pushLog(
+          'info',
+          `Đợt ${wave}/${Math.ceil(allTargets.length / safeThreads)}: ${pending.length} luồng — chờ tất cả thành công rồi mới sang đợt sau.`
+        )
+
+        // Trong đợt: chạy → lỗi thì thay mail → chạy lại các profile còn pending
+        while (!stopRef.current && pending.length > 0) {
+          const batch: WorkItem[] = pending.map((s, i) => ({
+            profile: s.profile,
+            gmail: s.gmail,
+            index: i,
+            listLine: s.listLine
+          }))
+
+          const tiles = await window.api.profiles.tileLayout(batch.length)
+          for (let i = 0; i < batch.length; i++) {
+            batch[i].windowBounds = tiles[i]
+          }
+
+          pushLog(
+            'info',
+            `Đợt ${wave} · thử: ${batch
+              .map((b) => `d${b.listLine}:${b.gmail.email}→${b.profile.name}`)
+              .join(', ')}`
+          )
+
+          const STAGGER_MS = 2800
+          const results = await Promise.all(
+            batch.map((item, i) =>
+              processOne(item, allTargets.length, i * STAGGER_MS)
+            )
+          )
+
+          await window.api.profiles
+            .arrangeWindows(batch.map((b) => b.profile.id))
+            .catch(() => undefined)
+
+          const stillPending: SlotState[] = []
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i]
+            const slot = pending[i]
+            if (r.filled) {
+              successEmails.push(r.email)
+              filledNow += 1
+              continue
+            }
+
+            if (!r.alreadyUsed) {
+              runFailed.push(r.email)
+            }
+
+            const replacement = takeNextMail()
+            if (!replacement) {
+              pushLog(
+                'warn',
+                `Đợt ${wave} · ${slot.profile.name}: hết mail sau lỗi dòng ${slot.listLine} (${r.email}) — bỏ profile này.`
+              )
+              continue
+            }
+
+            pushLog(
+              'warn',
+              `Đợt ${wave} · ${slot.profile.name}: dòng ${slot.listLine} lỗi (${r.email}) → thay dòng ${replacement.listLine}: ${replacement.gmail.email}`
+            )
+            stillPending.push({
+              profile: slot.profile,
+              gmail: replacement.gmail,
+              listLine: replacement.listLine,
+              attempt: slot.attempt + 1
+            })
+          }
+
+          pending = stillPending
+
+          if (runFailed.length) {
+            const merged = [...failedEmails]
+            const set = new Set(merged.map((e) => e.toLowerCase()))
+            for (const email of runFailed) {
+              if (!set.has(email.toLowerCase())) {
+                set.add(email.toLowerCase())
+                merged.push(email)
+              }
+            }
+            const successSet = new Set(successEmails.map((e) => e.toLowerCase()))
+            persistFailedEmails(merged.filter((e) => !successSet.has(e.toLowerCase())))
+          }
+
+          if (pending.length > 0 && !stopRef.current) {
+            pushLog(
+              'info',
+              `Đợt ${wave}: còn ${pending.length}/${waveProfiles.length} profile chưa OK — chạy lại trước khi sang đợt sau.`
+            )
+          }
+        }
+
+        if (stopRef.current) {
+          pushLog('warn', 'Đã dừng theo yêu cầu.')
+          break
+        }
+
+        if (pending.length === 0) {
+          pushLog('success', `Đợt ${wave}: đủ ${waveProfiles.length} luồng xong — sang profile tiếp theo.`)
+        }
+      }
+
+      removeEmailsFromList(successEmails)
+      if (runFailed.length) {
+        const successSet = new Set(successEmails.map((e) => e.toLowerCase()))
+        const merged = [...failedEmails]
+        const set = new Set(merged.map((e) => e.toLowerCase()))
+        for (const email of runFailed) {
+          if (!set.has(email.toLowerCase())) {
+            set.add(email.toLowerCase())
+            merged.push(email)
+          }
+        }
+        persistFailedEmails(merged.filter((e) => !successSet.has(e.toLowerCase())))
+        pushLog(
+          'warn',
+          `${runFailed.length} mail lỗi — bấm "Xóa mail lỗi" để gỡ khỏi danh sách.`
+        )
+      }
+
+      await refreshAll()
+      const remainEmpty = (await reloadProfiles()).filter(
+        (p) => p.groupId === groupId && !hasGmailCredentials(p.gmail)
+      ).length
+      pushLog(
+        'info',
+        `Hoàn tất mail cũ: login OK ${filledNow} · mail lỗi đã thử ${runFailed.length} · còn trống: ${remainEmpty}.`
+      )
+    } finally {
+      lineByEmailRef.current = new Map()
+      setRunning(false)
+    }
+  }
+
+  async function runNewMailParallel(): Promise<void> {
+    stopRef.current = false
+    setRunning(true)
+    setLogs([])
+
+    const pairs = [...newMailPairs]
+    lineByEmailRef.current = new Map(
+      pairs.map((p) => [normalizeEmailKey(p.gmail.email), p.listLine])
+    )
+
     try {
       await window.api.profiles.saveGmailSetup({
         enabled: postSetupEnabled,
@@ -731,110 +1100,85 @@ export function GmailPage(): JSX.Element {
     const successEmails: string[] = []
     const runFailed: string[] = []
     let filledNow = 0
-    // Email đã dùng toàn cục + đang giữ trong batch hiện tại
-    const claimedEmails = new Set(usedEmailsGlobal)
-    const queue = [...gmailQueue]
-    let gmailIndex = 0
-
-    if (duplicateInList.length > 0) {
-      pushLog(
-        'warn',
-        `Bỏ qua ${duplicateInList.length} mail đã gắn profile khác: ${duplicateInList
-          .slice(0, 5)
-          .map((g) => g.email)
-          .join(', ')}${duplicateInList.length > 5 ? '…' : ''}`
-      )
-    }
 
     pushLog(
       'info',
-      `Bắt đầu song song ${safeThreads} luồng · slot trống ${emptySlots.length} · mail còn dùng được ${availableQueue.length}/${queue.length}.`
+      `Mail mới · ghép 1–1: ${pairs.length} cặp (profile nhóm ${groupProfiles.length} · dòng mail lấy ${pairs.length}/${availableQueue.length}).`
     )
+    for (const p of pairs) {
+      pushLog(
+        'info',
+        `Ánh xạ dòng ${p.listLine}: ${p.gmail.email} → ${p.profile.name}` +
+          (hasGmailCredentials(p.profile.gmail) ? ' (đã có mail — sẽ bỏ qua login)' : '')
+      )
+    }
+
+    if (availableQueue.length > groupProfiles.length) {
+      pushLog(
+        'warn',
+        `Còn ${availableQueue.length - groupProfiles.length} dòng mail chưa lấy (nhiều hơn số profile trong nhóm).`
+      )
+    } else if (groupProfiles.length > availableQueue.length) {
+      pushLog(
+        'warn',
+        `Nhóm có ${groupProfiles.length} profile nhưng chỉ còn ${availableQueue.length} mail dùng được — chạy ${pairs.length} cặp.`
+      )
+    }
 
     try {
-      while (!stopRef.current) {
-        const latest = await reloadProfiles()
-        // Cập nhật claimed theo DB mới nhất (mọi nhóm)
-        for (const p of latest) {
-          if (!hasGmailCredentials(p.gmail)) continue
-          const key = normalizeEmailKey(p.gmail?.email)
-          if (key) claimedEmails.add(key)
-        }
+      let offset = 0
+      while (!stopRef.current && offset < pairs.length) {
+        const slice = pairs.slice(offset, offset + safeThreads)
+        offset += slice.length
 
-        const slots = latest
-          .filter((p) => p.groupId === groupId && !hasGmailCredentials(p.gmail))
-          .sort((a, b) => a.name.localeCompare(b.name, 'vi'))
+        const batch: WorkItem[] = slice.map((p) => ({
+          profile: p.profile,
+          gmail: p.gmail,
+          index: p.pairIndex,
+          listLine: p.listLine,
+          windowBounds: undefined
+        }))
 
-        if (slots.length === 0) {
-          pushLog('success', 'Nhóm đã đầy — dừng.')
-          break
-        }
-
-        const batch: WorkItem[] = []
-        const tilesNeeded = Math.min(safeThreads, slots.length)
-        // Nhặt mail chưa claimed
-        while (batch.length < tilesNeeded && gmailIndex < queue.length) {
-          const gmail = queue[gmailIndex]
-          const key = normalizeEmailKey(gmail.email)
-          gmailIndex += 1
-          if (!key || claimedEmails.has(key)) {
-            pushLog(
-              'warn',
-              `Bỏ qua ${gmail.email} — đã gắn profile khác hoặc trùng trong hàng đợi.`
-            )
-            continue
+        // Chỉ mở Chrome cho profile còn trống (đã có mail thì processOne bỏ qua, không cần tile)
+        const runnable = batch.filter((b) => !hasGmailCredentials(b.profile.gmail))
+        if (runnable.length > 0) {
+          const tiles = await window.api.profiles.tileLayout(runnable.length)
+          let ti = 0
+          for (const item of batch) {
+            if (!hasGmailCredentials(item.profile.gmail)) {
+              item.windowBounds = tiles[ti]
+              ti += 1
+            }
           }
-          claimedEmails.add(key) // giữ chỗ trước khi login xong
-          batch.push({
-            profile: slots[batch.length],
-            gmail,
-            index: gmailIndex - 1
-          })
-        }
-
-        if (batch.length === 0) {
-          pushLog('info', 'Hết mail mới trong danh sách — dừng.')
-          break
-        }
-
-        const tiles = await window.api.profiles.tileLayout(batch.length)
-        for (let i = 0; i < batch.length; i++) {
-          batch[i].windowBounds = tiles[i]
         }
 
         pushLog(
           'info',
-          `Mở ${batch.length} Chrome chia lưới (mỗi luồng lệch ~2.8s): ${batch
-            .map((b) => `${b.gmail.email}→${b.profile.name}`)
+          `Batch dòng ${slice[0].listLine}–${slice[slice.length - 1].listLine}: ${batch
+            .map((b) => `d${b.listLine}:${b.gmail.email}→${b.profile.name}`)
             .join(', ')}`
         )
 
-        // Stagger: mỗi Chrome lệch nhau nhiều hơn — tránh thao tác đồng bộ (dễ bị coi bot)
         const STAGGER_MS = 2800
         const results = await Promise.all(
-          batch.map((item, i) => processOne(item, queue.length, i * STAGGER_MS))
+          batch.map((item, i) => processOne(item, pairs.length, i * STAGGER_MS))
         )
 
-        // Sắp lại lần nữa sau khi tất cả đã mở (tránh lệch vị trí)
         await window.api.profiles
-          .arrangeWindows(batch.map((b) => b.profile.id))
+          .arrangeWindows(runnable.map((b) => b.profile.id))
           .catch(() => undefined)
 
         for (const r of results) {
           if (r.filled) {
             successEmails.push(r.email)
             filledNow += 1
-            claimedEmails.add(normalizeEmailKey(r.email))
           } else if (r.alreadyUsed) {
-            // Đã gắn profile khác — không đưa vào "Xóa mail lỗi"
-            claimedEmails.add(normalizeEmailKey(r.email))
+            // skip failed list
           } else {
             runFailed.push(r.email)
-            claimedEmails.add(normalizeEmailKey(r.email))
           }
         }
 
-        // Cập nhật mail lỗi ngay sau mỗi batch (robot / login fail)
         if (runFailed.length) {
           const merged = [...failedEmails]
           const set = new Set(merged.map((e) => e.toLowerCase()))
@@ -854,11 +1198,9 @@ export function GmailPage(): JSX.Element {
         }
       }
 
-      // Chỉ gỡ mail thành công; mail lỗi giữ lại để xem / xóa bằng nút
       removeEmailsFromList(successEmails)
       if (runFailed.length) {
         const successSet = new Set(successEmails.map((e) => e.toLowerCase()))
-        // failedEmails state có thể đã được cập nhật từng batch — merge lần cuối từ runFailed
         const merged = [...failedEmails]
         const set = new Set(merged.map((e) => e.toLowerCase()))
         for (const email of runFailed) {
@@ -867,26 +1209,20 @@ export function GmailPage(): JSX.Element {
             merged.push(email)
           }
         }
-        const nextFailed = merged.filter((e) => !successSet.has(e.toLowerCase()))
-        persistFailedEmails(nextFailed)
+        persistFailedEmails(merged.filter((e) => !successSet.has(e.toLowerCase())))
         pushLog(
           'warn',
-          `${runFailed.length} mail lỗi (gồm robot/captcha nếu có) — bấm "Xóa mail lỗi" để gỡ khỏi danh sách.`
+          `${runFailed.length} mail lỗi — bấm "Xóa mail lỗi" để gỡ khỏi danh sách.`
         )
-      } else if (successEmails.length) {
-        const successSet = new Set(successEmails.map((e) => e.toLowerCase()))
-        persistFailedEmails(failedEmails.filter((e) => !successSet.has(e.toLowerCase())))
       }
 
       await refreshAll()
-      const remainEmpty = (await reloadProfiles()).filter(
-        (p) => p.groupId === groupId && !hasGmailCredentials(p.gmail)
-      ).length
       pushLog(
         'info',
-        `Hoàn tất: login thành công ${filledNow} · lỗi ${runFailed.length} · còn trống trong nhóm: ${remainEmpty}.`
+        `Hoàn tất mail mới: ${filledNow}/${pairs.length} cặp OK · lỗi ${runFailed.length}.`
       )
     } finally {
+      lineByEmailRef.current = new Map()
       setRunning(false)
     }
   }
@@ -906,7 +1242,7 @@ export function GmailPage(): JSX.Element {
       {/* Thanh điều khiển chính */}
       <div className="panel p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div className="grid flex-1 gap-3 sm:grid-cols-3">
+          <div className="grid flex-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <label className="label">Nhóm cần đổ đầy</label>
               <select
@@ -945,6 +1281,27 @@ export function GmailPage(): JSX.Element {
               />
               <div className="mt-1 text-[11px] text-ink-muted">
                 Nhập {THREADS_MIN}–{THREADS_MAX}, giá trị được nhớ sau khi thoát
+              </div>
+            </div>
+            <div>
+              <label className="label">Loại mail</label>
+              <select
+                className="input"
+                value={mailKind}
+                disabled={running}
+                onChange={(e) => {
+                  const next = e.target.value === 'new' ? 'new' : 'old'
+                  setMailKind(next)
+                  persistMailKind(next)
+                }}
+              >
+                <option value="old">Mail cũ (lỗi → thay dòng tiếp)</option>
+                <option value="new">Mail mới (ghép 1–1 cố định)</option>
+              </select>
+              <div className="mt-1 text-[11px] text-ink-muted">
+                {mailKind === 'new'
+                  ? 'Robot → bấm I’m not a robot. Ghép 1–1 dòng list ↔ profile nhóm (không thay khi lỗi).'
+                  : 'Robot → bấm I’m not a robot. Mỗi đợt N luồng phải OK hết; mail lỗi → thay dòng tiếp.'}
               </div>
             </div>
             <div className="flex items-end">
@@ -1024,7 +1381,9 @@ export function GmailPage(): JSX.Element {
           <div className="panel p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h2 className="font-display text-base font-semibold text-ink">Danh sách Gmail</h2>
+                <h2 className="font-display text-base font-semibold text-ink">
+                  Danh sách Gmail ({gmailQueue.length})
+                </h2>
                 <p className="mt-0.5 text-xs text-ink-muted">
                   Mỗi dòng: <span className="font-mono">mail|pass|2fa</span> (cột 3 = mã 6 số)
                 </p>
@@ -1335,8 +1694,23 @@ export function GmailPage(): JSX.Element {
               </div>
             </div>
             <p className="text-xs text-ink-muted">
-              Mỗi batch mở tối đa <span className="font-medium text-ink-soft">{safeThreads}</span>{' '}
-              Chrome, chia lưới đều. Hết slot trống thì dừng.
+              {mailKind === 'new' ? (
+                <>
+                  Mail mới: lấy{' '}
+                  <span className="font-medium text-ink-soft">{newMailPairs.length}</span> dòng
+                  Gmail = số cặp 1–1 với profile trong nhóm (tối đa {groupProfiles.length}{' '}
+                  profile). Mỗi batch tối đa{' '}
+                  <span className="font-medium text-ink-soft">{safeThreads}</span> Chrome.
+                </>
+              ) : (
+                <>
+                  Mail cũ: mỗi đợt{' '}
+                  <span className="font-medium text-ink-soft">{safeThreads}</span> luồng phải login
+                  OK hết (mail lỗi → thay dòng tiếp) rồi mới sang profile tiếp theo. Lần đầu{' '}
+                  <span className="font-medium text-ink-soft">{oldMailInitialPairs.length}</span>{' '}
+                  cặp.
+                </>
+              )}
             </p>
             {groupProfiles.length === 0 ? (
               <div className="rounded-lg border border-dashed border-line px-3 py-4 text-sm text-ink-muted">
@@ -1371,24 +1745,25 @@ export function GmailPage(): JSX.Element {
             <div className="mb-3 flex items-center justify-between gap-2">
               <h2 className="flex items-center gap-2 font-display text-base font-semibold text-ink">
                 <ListOrdered size={16} />
-                Hàng đợi
+                {mailKind === 'new'
+                  ? 'Ánh xạ dòng → profile'
+                  : 'Ánh xạ lần đầu (lỗi → thay dòng tiếp)'}
               </h2>
               <span className="rounded-md bg-surface-muted px-2 py-0.5 text-[11px] text-ink-muted">
-                {availableQueue.length}/{gmailQueue.length} dùng được
+                {mailKind === 'new'
+                  ? `${newMailPairs.length} cặp`
+                  : `${oldMailInitialPairs.length} cặp · ${availableQueue.length} mail`}
               </span>
             </div>
             {gmailQueue.length === 0 ? (
               <div className="text-sm text-ink-muted">Chưa có dòng hợp lệ.</div>
-            ) : (
+            ) : mailKind === 'new' ? (
               <ol className="max-h-52 space-y-1 overflow-auto text-sm">
                 {gmailQueue.map((item, index) => {
                   const alreadyUsed = usedEmailsGlobal.has(normalizeEmailKey(item.email))
-                  const availIndex = alreadyUsed
-                    ? -1
-                    : availableQueue.findIndex(
-                        (g) => normalizeEmailKey(g.email) === normalizeEmailKey(item.email)
-                      )
-                  const willRun = !alreadyUsed && availIndex >= 0 && availIndex < willUse
+                  const pair = newMailPairs.find(
+                    (p) => normalizeEmailKey(p.gmail.email) === normalizeEmailKey(item.email)
+                  )
                   return (
                     <li
                       key={`${item.email}-${index}`}
@@ -1396,7 +1771,7 @@ export function GmailPage(): JSX.Element {
                         'flex items-center gap-2 rounded-lg border border-line px-2.5 py-1.5',
                         alreadyUsed
                           ? 'bg-danger/5 opacity-70'
-                          : willRun
+                          : pair
                             ? 'bg-accent-soft/50'
                             : 'bg-surface-muted/30'
                       )}
@@ -1409,10 +1784,67 @@ export function GmailPage(): JSX.Element {
                       </span>
                       {alreadyUsed ? (
                         <span className="shrink-0 text-[10px] text-danger">Đã gắn</span>
-                      ) : willRun ? (
-                        <span className="shrink-0 text-[10px] text-accent-strong">Sẽ dùng</span>
+                      ) : pair ? (
+                        <span
+                          className="max-w-[40%] shrink-0 truncate text-[10px] text-accent-strong"
+                          title={pair.profile.name}
+                        >
+                          → {pair.profile.name}
+                        </span>
                       ) : (
-                        <span className="shrink-0 text-[10px] text-ink-muted">Chờ</span>
+                        <span className="shrink-0 text-[10px] text-ink-muted">Không lấy</span>
+                      )}
+                    </li>
+                  )
+                })}
+              </ol>
+            ) : (
+              <ol className="max-h-52 space-y-1 overflow-auto text-sm">
+                {gmailQueue.map((item, index) => {
+                  const alreadyUsed = usedEmailsGlobal.has(normalizeEmailKey(item.email))
+                  const pair = oldMailInitialPairs.find(
+                    (p) => normalizeEmailKey(p.gmail.email) === normalizeEmailKey(item.email)
+                  )
+                  const availIndex = alreadyUsed
+                    ? -1
+                    : availableQueue.findIndex(
+                        (g) => normalizeEmailKey(g.email) === normalizeEmailKey(item.email)
+                      )
+                  const isReserve =
+                    !alreadyUsed && !pair && availIndex >= oldMailInitialPairs.length
+                  return (
+                    <li
+                      key={`${item.email}-${index}`}
+                      className={cn(
+                        'flex items-center gap-2 rounded-lg border border-line px-2.5 py-1.5',
+                        alreadyUsed
+                          ? 'bg-danger/5 opacity-70'
+                          : pair
+                            ? 'bg-accent-soft/50'
+                            : isReserve
+                              ? 'bg-warning/10'
+                              : 'bg-surface-muted/30'
+                      )}
+                    >
+                      <span className="w-5 shrink-0 font-mono text-[11px] text-ink-muted">
+                        {index + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink">
+                        {item.email}
+                      </span>
+                      {alreadyUsed ? (
+                        <span className="shrink-0 text-[10px] text-danger">Đã gắn</span>
+                      ) : pair ? (
+                        <span
+                          className="max-w-[40%] shrink-0 truncate text-[10px] text-accent-strong"
+                          title={pair.profile.name}
+                        >
+                          → {pair.profile.name}
+                        </span>
+                      ) : isReserve ? (
+                        <span className="shrink-0 text-[10px] text-warning">Dự phòng</span>
+                      ) : (
+                        <span className="shrink-0 text-[10px] text-ink-muted">—</span>
                       )}
                     </li>
                   )

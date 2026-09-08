@@ -149,6 +149,11 @@ export interface GmailLoginOptions {
   /** Credentials dùng để login (ưu tiên hơn gmail đang lưu trên hồ sơ) */
   credentials?: GmailCredentials | null
   autoLoginGmail?: boolean
+  /**
+   * Mail cũ / mail mới: sau Next email, gặp Confirm you’re not a robot → bấm checkbox rồi nhập pass.
+   * Khác nhau ở cách ghép list ↔ profile (mail mới cố định 1–1; mail cũ thay mail khi lỗi).
+   */
+  mailKind?: 'old' | 'new'
   /** true: nếu đã có session Gmail thì giữ, không clear cookie */
   preferExistingSession?: boolean
   /** Sau login OK: đổi avatar + mở Sheet + Apps Script */

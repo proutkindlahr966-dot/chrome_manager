@@ -796,26 +796,132 @@ async function clickNext(
   }
 }
 
-async function waitForPasswordStep(page: Page, timeoutMs = 25000): Promise<void> {
+async function waitForPasswordStep(
+  page: Page,
+  options?: { mailKind?: 'old' | 'new'; timeoutMs?: number }
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? 25000
   // Captcha chữ → ưu tiên chờ user nhập (tới 3 phút)
   await waitForManualCaptchaIfNeeded(page)
+  // Mail cũ & mail mới: gặp Confirm you’re not a robot → bấm checkbox, rồi vào ô pass
+  await waitForPasswordStepAfterEmail(page, Math.max(timeoutMs, 45000))
+}
 
+async function pageHasRecaptchaCheckbox(page: Page): Promise<boolean> {
+  for (const frame of page.frames()) {
+    const found = await frame
+      .evaluate(() => {
+        return Boolean(
+          document.querySelector(
+            '.recaptcha-checkbox-borderAnimation, .recaptcha-checkbox-border, #recaptcha-anchor, .recaptcha-checkbox, [role="checkbox"]'
+          )
+        )
+      })
+      .catch(() => false)
+    if (found) return true
+  }
+  return false
+}
+
+/** Bấm checkbox “I’m not a robot” (thường nằm trong iframe reCAPTCHA) */
+async function clickImNotARobotCheckbox(page: Page): Promise<boolean> {
+  const frames = [...page.frames()].sort((a, b) => {
+    const score = (f: typeof a): number => {
+      const u = f.url().toLowerCase()
+      if (u.includes('recaptcha') && u.includes('anchor')) return 3
+      if (u.includes('recaptcha')) return 2
+      if (u.includes('bframe')) return 1
+      return 0
+    }
+    return score(b) - score(a)
+  })
+
+  for (const frame of frames) {
+    const clicked = await frame
+      .evaluate(() => {
+        const selectors = [
+          '.recaptcha-checkbox-borderAnimation',
+          '.recaptcha-checkbox-border',
+          '#recaptcha-anchor',
+          '.recaptcha-checkbox',
+          'span[role="checkbox"]',
+          'div[role="checkbox"]'
+        ]
+        for (const sel of selectors) {
+          const el = document.querySelector(sel) as HTMLElement | null
+          if (!el) continue
+          const r = el.getBoundingClientRect()
+          if (r.width < 2 && r.height < 2) continue
+          el.click()
+          return sel
+        }
+        return ''
+      })
+      .catch(() => '')
+    if (clicked) {
+      loginDebugLog('click I’m not a robot', { frame: frame.url().slice(0, 80), sel: clicked })
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Sau Next email: nếu Confirm you’re not a robot → bấm checkbox, chờ ô pass.
+ * Dùng chung cho mail cũ và mail mới.
+ */
+async function waitForPasswordStepAfterEmail(page: Page, timeoutMs: number): Promise<void> {
   const started = Date.now()
+  let clickedRobot = false
+  let lastClickAt = 0
+
   while (Date.now() - started < timeoutMs) {
     if (await hasManualTextCaptcha(page)) {
       await waitForManualCaptchaIfNeeded(page)
       continue
     }
-    await assertNotRobot(page)
-    const pass = await findVisible(page, PASSWORD_SELECTORS, 800)
+
+    const pass = await findVisible(page, PASSWORD_SELECTORS, 700)
     if (pass) {
       await pass.dispose()
+      if (clickedRobot) emitLoginProgress('Đã qua I’m not a robot → nhập mật khẩu', 'success')
       return
     }
-    await delay(300)
+
+    const text = await pageText(page)
+    const robotUi = isRobotChallenge(text) || (await pageHasRecaptchaCheckbox(page))
+    if (robotUi) {
+      const now = Date.now()
+      // Tránh spam click; cho phép thử lại sau ~3s nếu chưa có password
+      if (!clickedRobot || now - lastClickAt > 3000) {
+        if (!clickedRobot) {
+          emitLoginProgress('Gặp Confirm you’re not a robot — bấm checkbox')
+        }
+        const ok = await clickImNotARobotCheckbox(page)
+        if (ok) {
+          clickedRobot = true
+          lastClickAt = now
+          await humanDelay(1800, 3200)
+          continue
+        }
+        lastClickAt = now
+      }
+      await delay(800)
+      continue
+    }
+
+    await delay(350)
   }
+
+  const passLate = await findVisible(page, PASSWORD_SELECTORS, 2500)
+  if (passLate) {
+    await passLate.dispose()
+    return
+  }
+
+  // Hết giờ vẫn kẹt robot → mới coi là lỗi
   await assertNotRobot(page)
-  throw new Error('Không thấy ô mật khẩu sau khi nhập email (có thể Google chặn/chuyển challenge).')
+  throw new Error('Không thấy ô mật khẩu sau khi nhập email (captcha / robot).')
 }
 
 /** Sau Next mật khẩu: chờ màn chọn 2FA / ô TOTP / đã login */
@@ -1975,8 +2081,10 @@ async function ensureRealGmailInbox(page: Page): Promise<void> {
 async function performLogin(
   page: Page,
   gmail: GmailCredentials,
-  options?: { preferExistingSession?: boolean }
+  options?: { preferExistingSession?: boolean; mailKind?: 'old' | 'new' }
 ): Promise<void> {
+  const mailKind = options?.mailKind === 'new' ? 'new' : 'old'
+
   // Mở lại hồ sơ đã login sẵn: chỉ giữ session nếu đang ở Gmail thật
   if (options?.preferExistingSession) {
     if (isRealGmailAppUrl(page.url())) {
@@ -1992,7 +2100,9 @@ async function performLogin(
   }
 
   // Luôn bắt đầu từ trang đăng nhập (không nhảy inbox trước)
-  emitLoginProgress('Mở trang đăng nhập Google')
+  emitLoginProgress(
+    mailKind === 'new' ? 'Mở trang đăng nhập Google (mail mới)' : 'Mở trang đăng nhập Google'
+  )
   await resetToLoginPage(page)
   await humanDelay(700, 1400)
   await assertNotRobot(page)
@@ -2010,7 +2120,7 @@ async function performLogin(
   await clickNext(page, ['identifierNext'])
   await humanDelay(1200, 2200)
   await waitForManualCaptchaIfNeeded(page)
-  await waitForPasswordStep(page)
+  await waitForPasswordStep(page, { mailKind })
   await humanDelay(500, 1000)
 
   emitLoginProgress('Nhập mật khẩu (chậm, giống tay)')
@@ -2149,7 +2259,8 @@ export async function loginGmailForProfile(
     }
 
     await performLogin(page, gmail!, {
-      preferExistingSession: Boolean(options?.preferExistingSession)
+      preferExistingSession: Boolean(options?.preferExistingSession),
+      mailKind: options?.mailKind === 'new' ? 'new' : 'old'
     })
     await tagPageIdentity(page, identity)
     await ensureSinglePage(browser)
