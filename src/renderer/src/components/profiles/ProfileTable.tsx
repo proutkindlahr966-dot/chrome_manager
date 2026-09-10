@@ -1,3 +1,4 @@
+import { useEffect, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   Eraser,
   History,
@@ -20,12 +21,29 @@ interface ProfileTableProps {
   visibleColumns: ProfileColumnId[]
   onToggle: (id: string) => void
   onSelectAll: () => void
+  /** Chọn một dải id (kéo chuột / Shift+click) */
+  onSelectIds: (ids: string[]) => void
   onLaunch: (id: string) => void
   onStop: (id: string) => void
   onWipe: (id: string) => void
   onToggleRestore: (groupId: string, enabled: boolean) => void
   onEdit: (profile: ChromeProfile) => void
   onDelete: (id: string) => void
+}
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  return Boolean(
+    target.closest(
+      'button, a, input, textarea, select, label, [role="switch"], [data-no-row-select]'
+    )
+  )
+}
+
+function rangeIds(profiles: ChromeProfile[], from: number, to: number): string[] {
+  const a = Math.min(from, to)
+  const b = Math.max(from, to)
+  return profiles.slice(a, b + 1).map((p) => p.id)
 }
 
 export function ProfileTable({
@@ -35,6 +53,7 @@ export function ProfileTable({
   visibleColumns,
   onToggle,
   onSelectAll,
+  onSelectIds,
   onLaunch,
   onStop,
   onWipe,
@@ -48,6 +67,7 @@ export function ProfileTable({
   const colCount =
     1 + // checkbox
     (show('name') ? 1 : 0) +
+    (show('notes') ? 1 : 0) +
     (show('group') ? 1 : 0) +
     (show('gmail') ? 1 : 0) +
     (show('proxy') ? 1 : 0) +
@@ -55,6 +75,102 @@ export function ProfileTable({
     (show('status') ? 1 : 0) +
     (show('lastLaunched') ? 1 : 0) +
     (show('actions') ? 1 : 0)
+
+  const anchorIndexRef = useRef(0)
+  const dragRef = useRef<{
+    startIndex: number
+    additive: boolean
+    base: Set<string>
+    moved: boolean
+  } | null>(null)
+  const profilesRef = useRef(profiles)
+  profilesRef.current = profiles
+  const onSelectIdsRef = useRef(onSelectIds)
+  onSelectIdsRef.current = onSelectIds
+
+  useEffect(() => {
+    function endDrag(): void {
+      dragRef.current = null
+      document.body.classList.remove('select-none')
+    }
+    function onUp(): void {
+      endDrag()
+    }
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('blur', onUp)
+    return () => {
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('blur', onUp)
+      document.body.classList.remove('select-none')
+    }
+  }, [])
+
+  function applyDragSelection(toIndex: number): void {
+    const drag = dragRef.current
+    if (!drag) return
+    const ids = rangeIds(profilesRef.current, drag.startIndex, toIndex)
+    if (drag.additive) {
+      const next = new Set(drag.base)
+      for (const id of ids) next.add(id)
+      onSelectIdsRef.current([...next])
+    } else {
+      onSelectIdsRef.current(ids)
+    }
+  }
+
+  function onRowMouseDown(e: ReactMouseEvent, index: number): void {
+    if (e.button !== 0) return
+    if (isInteractiveTarget(e.target)) return
+
+    // Shift+click: chọn dải từ anchor
+    if (e.shiftKey) {
+      e.preventDefault()
+      const ids = rangeIds(profiles, anchorIndexRef.current, index)
+      if (e.ctrlKey || e.metaKey) {
+        const next = new Set(selectedIds)
+        for (const id of ids) next.add(id)
+        onSelectIds([...next])
+      } else {
+        onSelectIds(ids)
+      }
+      return
+    }
+
+    e.preventDefault()
+    document.body.classList.add('select-none')
+    const additive = e.ctrlKey || e.metaKey
+    dragRef.current = {
+      startIndex: index,
+      additive,
+      base: new Set(selectedIds),
+      moved: false
+    }
+    anchorIndexRef.current = index
+
+    if (additive) {
+      // Ctrl+click: chọn ↔ bỏ chọn dòng hiện tại; kéo thì cộng dải vào base
+      const next = new Set(selectedIds)
+      const id = profiles[index]?.id
+      if (id) {
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+        // base giữ selection sau khi toggle dòng đầu — kéo tiếp chỉ thêm dòng mới
+        dragRef.current.base = new Set(next)
+        onSelectIds([...next])
+      }
+    } else {
+      const id = profiles[index]?.id
+      if (id) onSelectIds([id])
+    }
+  }
+
+  function onRowMouseEnter(index: number): void {
+    const drag = dragRef.current
+    if (!drag) return
+    if (index !== drag.startIndex) drag.moved = true
+    applyDragSelection(index)
+    anchorIndexRef.current = index
+  }
 
   return (
     <div className="panel overflow-hidden">
@@ -73,7 +189,8 @@ export function ProfileTable({
                   aria-label="Chọn tất cả"
                 />
               </th>
-              {show('name') ? <th className="w-[18%] px-3 py-3 font-medium">Hồ sơ</th> : null}
+              {show('name') ? <th className="w-[14%] px-3 py-3 font-medium">Hồ sơ</th> : null}
+              {show('notes') ? <th className="w-[16%] px-3 py-3 font-medium">Ghi chú</th> : null}
               {show('group') ? <th className="w-[12%] px-3 py-3 font-medium">Nhóm</th> : null}
               {show('gmail') ? <th className="w-[18%] px-3 py-3 font-medium">Gmail</th> : null}
               {show('proxy') ? <th className="w-[14%] px-3 py-3 font-medium">Proxy</th> : null}
@@ -100,7 +217,7 @@ export function ProfileTable({
             </tr>
           </thead>
           <tbody>
-            {profiles.map((profile) => {
+            {profiles.map((profile, index) => {
               const group = profile.groupId ? groupMap.get(profile.groupId) : null
               const selected = selectedIds.has(profile.id)
               const running = profile.status === 'running'
@@ -111,10 +228,14 @@ export function ProfileTable({
               return (
                 <tr
                   key={profile.id}
+                  data-profile-index={index}
                   className={cn(
                     'border-t border-line transition hover:bg-surface-muted/40',
+                    'cursor-default',
                     selected && 'bg-accent-soft/50'
                   )}
+                  onMouseDown={(e) => onRowMouseDown(e, index)}
+                  onMouseEnter={() => onRowMouseEnter(index)}
                 >
                   <td className="px-3 py-2.5 align-middle">
                     <input
@@ -129,9 +250,6 @@ export function ProfileTable({
                       <div className="truncate font-medium text-ink" title={profile.name}>
                         {profile.name}
                       </div>
-                      <div className="mt-0.5 line-clamp-1 text-xs text-ink-muted">
-                        {profile.notes || 'Không có ghi chú'}
-                      </div>
                       {profile.tags.length > 0 ? (
                         <div className="mt-1 flex flex-wrap gap-1">
                           {profile.tags.slice(0, 3).map((tag) => (
@@ -139,6 +257,16 @@ export function ProfileTable({
                           ))}
                         </div>
                       ) : null}
+                    </td>
+                  ) : null}
+                  {show('notes') ? (
+                    <td className="px-3 py-2.5 align-middle">
+                      <div
+                        className="line-clamp-2 text-xs text-ink-soft"
+                        title={profile.notes || undefined}
+                      >
+                        {profile.notes || <span className="text-ink-muted">—</span>}
+                      </div>
                     </td>
                   ) : null}
                   {show('group') ? (
@@ -178,10 +306,25 @@ export function ProfileTable({
                   ) : null}
                   {show('proxy') ? (
                     <td className="px-3 py-2.5 align-middle font-mono text-xs text-ink-soft">
-                      <span className="block truncate">
-                        {profile.proxy.type === 'none'
+                      <span
+                        className="block truncate"
+                        title={
+                          profile.proxy.type === 'none' || !profile.proxy.host
+                            ? undefined
+                            : `${profile.proxy.host}:${profile.proxy.port ?? ''}${
+                                profile.proxy.username
+                                  ? `:${profile.proxy.username}:${profile.proxy.password ? '••••' : ''}`
+                                  : ''
+                              }`
+                        }
+                      >
+                        {profile.proxy.type === 'none' || !profile.proxy.host
                           ? '—'
-                          : `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port ?? ''}`}
+                          : `${profile.proxy.host}:${profile.proxy.port ?? ''}${
+                              profile.proxy.username
+                                ? `:${profile.proxy.username}:${profile.proxy.password ? '••••' : ''}`
+                                : ''
+                            }`}
                       </span>
                     </td>
                   ) : null}

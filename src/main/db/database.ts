@@ -337,12 +337,23 @@ export class Database {
     const baseName = input.name.trim() || 'Profile'
     const pad = Math.max(2, String(startIndex + count - 1).length)
     const created: ChromeProfile[] = []
+    const proxyList = input.proxyList
 
     for (let i = 0; i < count; i++) {
       const index = startIndex + i
+      const proxyForProfile =
+        proxyList && proxyList.length > 0
+          ? proxyList[i]
+            ? { ...DEFAULT_PROXY, ...proxyList[i] }
+            : { ...DEFAULT_PROXY }
+          : input.proxy
+            ? { ...DEFAULT_PROXY, ...input.proxy }
+            : undefined
+
       const profile = this.buildProfile({
         ...input,
-        name: `${baseName} ${String(index).padStart(pad, '0')}`
+        name: `${baseName} ${String(index).padStart(pad, '0')}`,
+        proxy: proxyForProfile
       })
       this.data.profiles.push(profile)
       created.push(profile)

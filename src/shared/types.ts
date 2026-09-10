@@ -66,6 +66,11 @@ export interface BulkCreateProfileInput extends CreateProfileInput {
   count: number
   /** Số bắt đầu khi đánh số tên, mặc định 1 */
   startIndex?: number
+  /**
+   * Danh sách proxy — mỗi phần tử gắn 1 hồ sơ theo thứ tự tạo.
+   * Hồ sơ vượt quá số dòng → không dùng proxy (none).
+   */
+  proxyList?: ProxyConfig[]
 }
 
 export interface UpdateProfileInput {

@@ -5,6 +5,7 @@ import { useAppStore } from '@/stores/app-store'
 import type { ChromeProfile, ProxyType } from '@shared/types'
 import { DEFAULT_PROXY } from '@shared/types'
 import { parseGmailLine, serializeGmail } from '@shared/gmail'
+import { parseProxyList, parseProxyString, serializeProxy } from '@shared/proxy'
 import {
   DEFAULT_PROFILE_PREFIX,
   formatProfileName,
@@ -19,9 +20,15 @@ interface ProfileFormModalProps {
 
 export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalProps): JSX.Element {
   const groups = useAppStore((s) => s.groups)
+  const filters = useAppStore((s) => s.filters)
   const createProfiles = useAppStore((s) => s.createProfiles)
   const updateProfile = useAppStore((s) => s.updateProfile)
   const settings = useAppStore((s) => s.settings)
+
+  function prefixForGroup(id: string): string {
+    if (!id) return DEFAULT_PROFILE_PREFIX
+    return groups.find((g) => g.id === id)?.name.trim() || DEFAULT_PROFILE_PREFIX
+  }
 
   const [name, setName] = useState('')
   const [notes, setNotes] = useState('')
@@ -30,10 +37,7 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
   const [homepage, setHomepage] = useState('chrome://newtab/')
   const [tags, setTags] = useState('')
   const [proxyType, setProxyType] = useState<ProxyType>('none')
-  const [proxyHost, setProxyHost] = useState('')
-  const [proxyPort, setProxyPort] = useState('')
-  const [proxyUser, setProxyUser] = useState('')
-  const [proxyPass, setProxyPass] = useState('')
+  const [proxyRaw, setProxyRaw] = useState('')
   const [count, setCount] = useState(1)
   const [startIndex, setStartIndex] = useState(1)
   const [prefix, setPrefix] = useState(DEFAULT_PROFILE_PREFIX)
@@ -87,10 +91,20 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
     return samples
   }, [isEdit, safeCount, startIndex, prefix, pad])
 
-  async function resolveAutoName(nextPrefix = DEFAULT_PROFILE_PREFIX): Promise<void> {
+  const proxyLines = useMemo(
+    () => parseProxyList(proxyRaw, proxyType === 'none' ? 'http' : proxyType),
+    [proxyRaw, proxyType]
+  )
+
+  async function resolveAutoName(nextGroupId: string): Promise<void> {
+    const nextPrefix = prefixForGroup(nextGroupId)
     const all = await window.api.profiles.list()
+    // Đánh số theo từng nhóm: chỉ xét hồ sơ cùng nhóm (hoặc chưa nhóm)
+    const scoped = all.filter((p) =>
+      nextGroupId ? p.groupId === nextGroupId : !p.groupId
+    )
     const next = suggestNextIndex(
-      all.map((p) => p.name),
+      scoped.map((p) => p.name),
       nextPrefix
     )
     setPrefix(nextPrefix)
@@ -101,15 +115,11 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
     if (!open) return
 
     setNotes(profile?.notes ?? '')
-    setGroupId(profile?.groupId ?? '')
     setUserAgent(profile?.userAgent ?? settings?.defaultUserAgent ?? '')
     setHomepage(profile?.homepage ?? 'chrome://newtab/')
     setTags(profile?.tags.join(', ') ?? '')
     setProxyType(profile?.proxy.type ?? 'none')
-    setProxyHost(profile?.proxy.host ?? '')
-    setProxyPort(profile?.proxy.port ? String(profile.proxy.port) : '')
-    setProxyUser(profile?.proxy.username ?? '')
-    setProxyPass(profile?.proxy.password ?? '')
+    setProxyRaw(profile?.proxy ? serializeProxy(profile.proxy) : '')
     setCount(1)
     setError(null)
 
@@ -122,12 +132,17 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
     setAutoLoginGmail(Boolean(profile?.autoLoginGmail))
 
     if (profile) {
+      setGroupId(profile.groupId ?? '')
       setName(profile.name)
       return
     }
 
+    // Tạo mới: ưu tiên nhóm đang lọc trên danh sách
+    const initialGroupId =
+      filters.groupId && filters.groupId !== 'all' ? filters.groupId : ''
+    setGroupId(initialGroupId)
     setName('')
-    void resolveAutoName(DEFAULT_PROFILE_PREFIX)
+    void resolveAutoName(initialGroupId)
   }, [open, profile, settings])
 
   async function onSubmit(e: FormEvent): Promise<void> {
@@ -141,45 +156,84 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
     setSaving(true)
     setError(null)
     try {
-      const payload = {
-        notes,
-        groupId: groupId || null,
-        userAgent,
-        homepage,
-        tags: tags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean),
-        proxy: {
-          ...DEFAULT_PROXY,
-          type: proxyType,
-          host: proxyHost.trim(),
-          port: proxyPort ? Number(proxyPort) : null,
-          username: proxyUser,
-          password: proxyPass
-        },
-        gmail: {
-          email: gmailEmail.trim(),
-          password: gmailPassword,
-          recoveryEmail: gmailRecovery.trim(),
-          totpSecret: gmailTotp.trim(),
-          raw: gmailRaw.trim()
-        },
-        autoLoginGmail
-      }
-
       if (profile) {
-        await updateProfile(profile.id, { ...payload, name: name.trim() })
+        // Sửa 1 hồ sơ: lấy dòng proxy đầu tiên hợp lệ
+        let proxy = { ...DEFAULT_PROXY }
+        if (proxyType !== 'none' && proxyRaw.trim()) {
+          const parsed =
+            proxyLines[0] ??
+            parseProxyString(
+              proxyRaw
+                .split(/\r?\n/)
+                .map((l) => l.trim())
+                .find(Boolean) ?? '',
+              proxyType
+            )
+          if (!parsed.host || !parsed.port) {
+            setError('Proxy không hợp lệ. Dùng dạng host:port:user:pass')
+            setSaving(false)
+            return
+          }
+          proxy = { ...parsed, type: proxyType }
+        }
+
+        await updateProfile(profile.id, {
+          name: name.trim(),
+          notes,
+          groupId: groupId || null,
+          userAgent,
+          homepage,
+          tags: tags
+            .split(',')
+            .map((t) => t.trim())
+            .filter(Boolean),
+          proxy,
+          gmail: {
+            email: gmailEmail.trim(),
+            password: gmailPassword,
+            recoveryEmail: gmailRecovery.trim(),
+            totpSecret: gmailTotp.trim(),
+            raw: gmailRaw.trim()
+          },
+          autoLoginGmail
+        })
       } else {
-        // Lấy lại số mới nhất trước khi tạo (tránh trùng nếu vừa tạo ở chỗ khác)
+        const useProxyList = proxyType !== 'none' && proxyLines.length > 0
+        if (proxyType !== 'none' && proxyRaw.trim() && proxyLines.length === 0) {
+          setError('Danh sách proxy không hợp lệ. Mỗi dòng: host:port:user:pass')
+          setSaving(false)
+          return
+        }
+
+        const nextPrefix = prefixForGroup(groupId)
         const all = await window.api.profiles.list()
+        const scoped = all.filter((p) =>
+          groupId ? p.groupId === groupId : !p.groupId
+        )
         const next = suggestNextIndex(
-          all.map((p) => p.name),
-          prefix
+          scoped.map((p) => p.name),
+          nextPrefix
         )
         await createProfiles({
-          ...payload,
-          name: prefix.trim() || DEFAULT_PROFILE_PREFIX,
+          name: nextPrefix,
+          notes,
+          groupId: groupId || null,
+          userAgent,
+          homepage,
+          tags: tags
+            .split(',')
+            .map((t) => t.trim())
+            .filter(Boolean),
+          proxy: useProxyList ? proxyLines[0] : undefined,
+          proxyList: useProxyList ? proxyLines : undefined,
+          gmail: {
+            email: gmailEmail.trim(),
+            password: gmailPassword,
+            recoveryEmail: gmailRecovery.trim(),
+            totpSecret: gmailTotp.trim(),
+            raw: gmailRaw.trim()
+          },
+          autoLoginGmail,
           count: safeCount,
           startIndex: next
         })
@@ -201,7 +255,7 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
       description={
         profile
           ? 'Cập nhật thông tin vận hành cho hồ sơ Chrome.'
-          : 'Tên hồ sơ được lấy tự động theo thứ tự hiện có (Profile 01, 02…).'
+          : 'Tên hồ sơ tự động theo từng nhóm (tên nhóm 01, 02…).'
       }
     >
       <form className="space-y-4" onSubmit={onSubmit}>
@@ -242,7 +296,11 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
                 <select
                   className="input"
                   value={groupId}
-                  onChange={(e) => setGroupId(e.target.value)}
+                  onChange={(e) => {
+                    const nextId = e.target.value
+                    setGroupId(nextId)
+                    void resolveAutoName(nextId)
+                  }}
                 >
                   <option value="">Chưa nhóm</option>
                   {groups.map((g) => (
@@ -263,8 +321,8 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
               </div>
               <div className="mt-2 text-xs text-ink-muted">
                 Tiền tố <span className="font-medium text-ink-soft">{prefix}</span>, bắt đầu từ{' '}
-                <span className="font-medium text-ink-soft">{startIndex}</span> (dựa trên hồ sơ
-                hiện có)
+                <span className="font-medium text-ink-soft">{startIndex}</span> (theo hồ sơ trong
+                nhóm)
               </div>
             </div>
           </>
@@ -385,59 +443,65 @@ export function ProfileFormModal({ open, profile, onClose }: ProfileFormModalPro
         </div>
 
         <div className="rounded-xl border border-line bg-surface-muted/40 p-4">
-          <div className="mb-3 font-medium text-ink">Proxy</div>
-          <div className="grid gap-4 md:grid-cols-4">
-            <div>
-              <label className="label">Loại</label>
-              <select
-                className="input"
-                value={proxyType}
-                onChange={(e) => setProxyType(e.target.value as ProxyType)}
-              >
-                <option value="none">Không dùng</option>
-                <option value="http">HTTP</option>
-                <option value="https">HTTPS</option>
-                <option value="socks5">SOCKS5</option>
-              </select>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="font-medium text-ink">
+              Danh sách proxy ({proxyLines.length})
             </div>
-            <div>
-              <label className="label">Host</label>
-              <input
-                className="input"
-                disabled={proxyType === 'none'}
-                value={proxyHost}
-                onChange={(e) => setProxyHost(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="label">Port</label>
-              <input
-                className="input"
-                disabled={proxyType === 'none'}
-                value={proxyPort}
-                onChange={(e) => setProxyPort(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="label">User</label>
-              <input
-                className="input"
-                disabled={proxyType === 'none'}
-                value={proxyUser}
-                onChange={(e) => setProxyUser(e.target.value)}
-              />
-            </div>
+            <select
+              className="input !w-auto !py-1.5"
+              value={proxyType === 'none' && proxyLines.length > 0 ? 'http' : proxyType}
+              onChange={(e) => setProxyType(e.target.value as ProxyType)}
+              aria-label="Loại proxy"
+            >
+              <option value="none">Không dùng</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
           </div>
-          <div className="mt-4">
-            <label className="label">Password</label>
-            <input
-              className="input"
-              type="password"
-              disabled={proxyType === 'none'}
-              value={proxyPass}
-              onChange={(e) => setProxyPass(e.target.value)}
-            />
-          </div>
+          <textarea
+            className="input min-h-[120px] font-mono text-xs leading-5"
+            value={proxyRaw}
+            onChange={(e) => {
+              const next = e.target.value
+              setProxyRaw(next)
+              const first = next
+                .split(/\r?\n/)
+                .map((l) => l.trim())
+                .find(Boolean)
+              if (!first) {
+                setProxyType('none')
+                return
+              }
+              const m = first.match(/^(https?|socks5):\/\//i)
+              if (m) {
+                setProxyType(m[1].toLowerCase() as ProxyType)
+              } else if (proxyType === 'none') {
+                setProxyType('http')
+              }
+            }}
+            placeholder={
+              isEdit
+                ? '180.149.35.219:29383:lgjXCh:kHbkUw'
+                : '14.190.207.188:27622:Uuyhsg:KBiiRY\n180.149.35.219:29383:lgjXCh:kHbkUw'
+            }
+          />
+          <p className="mt-1.5 text-xs text-ink-muted">
+            Mỗi dòng: <span className="font-mono">host:port:user:pass</span>
+            {!isEdit
+              ? ' — khi tạo nhiều hồ sơ, hồ sơ thứ 1 lấy dòng 1, thứ 2 lấy dòng 2…'
+              : null}
+            {!isEdit && proxyLines.length > 0 && safeCount !== proxyLines.length ? (
+              <>
+                {' '}
+                (đang tạo {safeCount} hồ sơ · {proxyLines.length} proxy
+                {safeCount > proxyLines.length
+                  ? ` · ${safeCount - proxyLines.length} hồ sơ cuối không có proxy`
+                  : ` · dùng ${safeCount}/${proxyLines.length} dòng`}
+                )
+              </>
+            ) : null}
+          </p>
         </div>
 
         {profile ? (

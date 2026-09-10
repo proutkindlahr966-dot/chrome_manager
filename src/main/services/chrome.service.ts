@@ -15,6 +15,11 @@ import { IPC } from '../../shared/ipc'
 import { LaunchResult, BulkResult, LaunchOptions, WindowBounds } from '../../shared/types'
 import { createAsyncLock, createKeyedAsyncLock } from '../utils/async-lock'
 import { toStatusPatch } from '../utils/profile-sanitize'
+import {
+  resolveChromeProxyServer,
+  stopAllProxyRelays,
+  stopProxyRelay
+} from './proxy-relay.service'
 
 interface RunningProcess {
   pid: number
@@ -208,18 +213,6 @@ function resolveStartupUrl(homepage: string | undefined): string {
   const raw = (homepage ?? '').trim()
   if (!raw || isNewTabUrl(raw)) return NEW_TAB_URL
   return raw
-}
-
-function buildProxyServer(profileId: string): string | null {
-  const profile = getDb().getProfile(profileId)
-  if (!profile || profile.proxy.type === 'none' || !profile.proxy.host || !profile.proxy.port) {
-    return null
-  }
-  const auth =
-    profile.proxy.username && profile.proxy.password
-      ? `${profile.proxy.username}:${profile.proxy.password}@`
-      : ''
-  return `${profile.proxy.type}://${auth}${profile.proxy.host}:${profile.proxy.port}`
 }
 
 function emitStatus(profileId: string): void {
@@ -438,7 +431,7 @@ async function launchProfileUnlocked(
       args.push(`--window-size=${Math.round(b.width)},${Math.round(b.height)}`)
     }
 
-    const proxy = buildProxyServer(profileId)
+    const proxy = await resolveChromeProxyServer(profileId, profile.proxy)
     if (proxy) args.push(`--proxy-server=${proxy}`)
 
     const startupUrl = resolveStartupUrl(profile.homepage)
@@ -477,6 +470,7 @@ async function launchProfileUnlocked(
     child.on('exit', () => {
       running.delete(profileId)
       releasePort(debugPort!)
+      void stopProxyRelay(profileId)
       try {
         db.setProfileStatus(profileId, 'idle')
         emitStatus(profileId)
@@ -491,6 +485,7 @@ async function launchProfileUnlocked(
   } catch (error) {
     running.delete(profileId)
     if (debugPort !== undefined) releasePort(debugPort)
+    void stopProxyRelay(profileId)
     db.setProfileStatus(profileId, 'error')
     emitStatus(profileId)
     return {
@@ -566,12 +561,14 @@ async function stopProfileUnlocked(profileId: string): Promise<LaunchResult> {
 
     running.delete(profileId)
     releasePort(entry.debugPort)
+    await stopProxyRelay(profileId)
     db.setProfileStatus(profileId, 'idle')
     emitStatus(profileId)
     return { profileId, success: true, pid: entry.pid }
   } catch (error) {
     running.delete(profileId)
     releasePort(entry.debugPort)
+    await stopProxyRelay(profileId)
     db.setProfileStatus(profileId, 'error')
     emitStatus(profileId)
     return {
@@ -623,4 +620,5 @@ export async function bulkStop(ids: string[]): Promise<BulkResult> {
 export async function stopAllRunning(): Promise<void> {
   const ids = [...running.keys()]
   await bulkStop(ids)
+  await stopAllProxyRelays()
 }

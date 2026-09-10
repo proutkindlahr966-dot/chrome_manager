@@ -1,5 +1,6 @@
 export type ProfileColumnId =
   | 'name'
+  | 'notes'
   | 'group'
   | 'gmail'
   | 'proxy'
@@ -17,6 +18,7 @@ export interface ProfileColumnDef {
 
 export const PROFILE_COLUMNS: ProfileColumnDef[] = [
   { id: 'name', label: 'Hồ sơ', locked: true },
+  { id: 'notes', label: 'Ghi chú' },
   { id: 'group', label: 'Nhóm' },
   { id: 'gmail', label: 'Gmail' },
   { id: 'proxy', label: 'Proxy' },
@@ -38,6 +40,11 @@ export function loadVisibleColumns(): ProfileColumnId[] {
     if (!Array.isArray(parsed)) return [...DEFAULT_VISIBLE_COLUMNS]
     const allowed = new Set(PROFILE_COLUMNS.map((c) => c.id))
     const next = parsed.filter((id): id is ProfileColumnId => typeof id === 'string' && allowed.has(id as ProfileColumnId))
+    // Cột mới: chèn Ghi chú ngay sau Hồ sơ nếu preference cũ chưa có
+    if (!next.includes('notes')) {
+      const nameIdx = next.indexOf('name')
+      next.splice(nameIdx >= 0 ? nameIdx + 1 : 0, 0, 'notes')
+    }
     // Luôn giữ cột khóa
     for (const col of PROFILE_COLUMNS) {
       if (col.locked && !next.includes(col.id)) next.push(col.id)

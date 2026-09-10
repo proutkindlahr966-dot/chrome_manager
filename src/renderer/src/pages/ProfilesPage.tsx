@@ -429,6 +429,7 @@ export function ProfilesPage(): JSX.Element {
             if (allSelected) clearSelection()
             else selectAll(profiles.map((p) => p.id))
           }}
+          onSelectIds={selectAll}
           onLaunch={(id) => void handleLaunch([id])}
           onStop={(id) => void handleStop([id])}
           onWipe={(id) => void handleWipeProfile(id)}
