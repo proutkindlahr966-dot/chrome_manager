@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Columns3,
+  Copy,
   FolderInput,
   Play,
   Plus,
@@ -19,6 +20,12 @@ import {
   saveVisibleColumns,
   type ProfileColumnId
 } from '@/components/profiles/profile-columns'
+import {
+  loadProfilePageSize,
+  persistProfilePageSize,
+  PROFILE_PAGE_SIZE_OPTIONS,
+  type ProfilePageSize
+} from '@/components/profiles/profile-page-size'
 import { Modal } from '@/components/ui/Modal'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { useAppStore } from '@/stores/app-store'
@@ -50,12 +57,40 @@ export function ProfilesPage(): JSX.Element {
   const [visibleColumns, setVisibleColumns] = useState<ProfileColumnId[]>(() => loadVisibleColumns())
   const [columnsOpen, setColumnsOpen] = useState(false)
   const columnsRef = useRef<HTMLDivElement>(null)
+  const [pageSize, setPageSize] = useState<ProfilePageSize>(() => loadProfilePageSize())
+  const [page, setPage] = useState(1)
 
   useEffect(() => {
     if ((filters.search ?? '') !== debouncedSearch) {
       setFilters({ search: debouncedSearch })
     }
   }, [debouncedSearch, filters.search, setFilters])
+
+  // Đổi bộ lọc / sắp xếp → về trang 1
+  useEffect(() => {
+    setPage(1)
+  }, [filters.search, filters.groupId, filters.status, filters.sortBy, filters.sortDir])
+
+  const totalPages = Math.max(1, Math.ceil(profiles.length / pageSize))
+  const safePage = Math.min(page, totalPages)
+
+  useEffect(() => {
+    if (page !== safePage) setPage(safePage)
+  }, [page, safePage])
+
+  const pageProfiles = useMemo(() => {
+    const start = (safePage - 1) * pageSize
+    return profiles.slice(start, start + pageSize)
+  }, [profiles, safePage, pageSize])
+
+  const rangeFrom = profiles.length === 0 ? 0 : (safePage - 1) * pageSize + 1
+  const rangeTo = Math.min(safePage * pageSize, profiles.length)
+
+  function commitPageSize(next: ProfilePageSize): void {
+    setPageSize(next)
+    persistProfilePageSize(next)
+    setPage(1)
+  }
 
   useEffect(() => {
     if (!columnsOpen) return
@@ -94,7 +129,32 @@ export function ProfilesPage(): JSX.Element {
     setVisibleColumns(next)
   }
 
-  const selectedList = useMemo(() => [...selectedIds], [selectedIds])
+  const selectedList = useMemo(
+    () => profiles.filter((p) => selectedIds.has(p.id)).map((p) => p.id),
+    [profiles, selectedIds]
+  )
+
+  /** Mail đã gắn trên các hồ sơ đang lọc (thường là 1 nhóm đã chọn). */
+  const attachedEmails = useMemo(() => {
+    const emails: string[] = []
+    const seen = new Set<string>()
+    for (const p of profiles) {
+      const email = p.gmail?.email?.trim()
+      if (!email) continue
+      const key = email.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      emails.push(email)
+    }
+    return emails
+  }, [profiles])
+
+  const selectedGroupId = filters.groupId ?? 'all'
+  const hasSelectedGroup = selectedGroupId !== 'all'
+  const selectedGroupName = useMemo(() => {
+    if (selectedGroupId === 'ungrouped') return 'Chưa nhóm'
+    return groups.find((g) => g.id === selectedGroupId)?.name ?? 'Nhóm'
+  }, [groups, selectedGroupId])
 
   const hasActiveFilters = useMemo(() => {
     return Boolean(
@@ -103,6 +163,28 @@ export function ProfilesPage(): JSX.Element {
         (filters.status && filters.status !== 'all')
     )
   }, [filters])
+
+  async function copyAttachedEmails(): Promise<void> {
+    if (attachedEmails.length === 0) {
+      toast({ tone: 'warning', title: 'Không có mail đã gắn trong nhóm này' })
+      return
+    }
+    const text = attachedEmails.join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      toast({
+        tone: 'success',
+        title: `Đã copy ${attachedEmails.length} mail`,
+        description: hasSelectedGroup ? selectedGroupName : undefined
+      })
+    } catch {
+      toast({
+        tone: 'error',
+        title: 'Không copy được vào clipboard',
+        description: 'Hãy kiểm tra quyền clipboard của ứng dụng.'
+      })
+    }
+  }
 
   function openCreate(): void {
     setEditing(null)
@@ -236,7 +318,7 @@ export function ProfilesPage(): JSX.Element {
               onChange={(e) => setSearchInput(e.target.value)}
             />
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 lg:w-auto lg:shrink-0">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6 lg:w-auto lg:shrink-0">
             <select
               className="input"
               value={filters.groupId ?? 'all'}
@@ -283,6 +365,18 @@ export function ProfilesPage(): JSX.Element {
             >
               <option value="desc">Giảm dần</option>
               <option value="asc">Tăng dần</option>
+            </select>
+            <select
+              className="input"
+              value={pageSize}
+              title="Số hồ sơ mỗi trang"
+              onChange={(e) => commitPageSize(Number(e.target.value) as ProfilePageSize)}
+            >
+              {PROFILE_PAGE_SIZE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}/trang
+                </option>
+              ))}
             </select>
             <div className="relative col-span-2 sm:col-span-1" ref={columnsRef}>
               <button
@@ -346,6 +440,26 @@ export function ProfilesPage(): JSX.Element {
               ) : null}
             </div>
           </div>
+          {hasSelectedGroup ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3">
+              <span className="text-sm text-ink-soft">
+                <span className="font-medium text-ink">{selectedGroupName}</span>
+                {' · '}
+                Mail đã gắn: {attachedEmails.length}/{profiles.length}
+              </span>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={attachedEmails.length === 0}
+                title="Copy các mail đã gắn trong nhóm đang chọn (mỗi dòng một mail)"
+                onClick={() => void copyAttachedEmails()}
+              >
+                <Copy size={14} />
+                Copy mail
+                {attachedEmails.length > 0 ? ` (${attachedEmails.length})` : ''}
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -418,27 +532,84 @@ export function ProfilesPage(): JSX.Element {
           />
         )
       ) : (
-        <ProfileTable
-          profiles={profiles}
-          groups={groups}
-          selectedIds={selectedIds}
-          visibleColumns={visibleColumns}
-          onToggle={toggleSelect}
-          onSelectAll={() => {
-            const allSelected = profiles.every((p) => selectedIds.has(p.id))
-            if (allSelected) clearSelection()
-            else selectAll(profiles.map((p) => p.id))
-          }}
-          onSelectIds={selectAll}
-          onLaunch={(id) => void handleLaunch([id])}
-          onStop={(id) => void handleStop([id])}
-          onWipe={(id) => void handleWipeProfile(id)}
-          onToggleRestore={(groupId, enabled) =>
-            void updateGroup(groupId, { restoreLastSession: enabled })
-          }
-          onEdit={openEdit}
-          onDelete={(id) => void confirmDelete([id])}
-        />
+        <>
+          <ProfileTable
+            profiles={pageProfiles}
+            groups={groups}
+            selectedIds={selectedIds}
+            visibleColumns={visibleColumns}
+            onToggle={toggleSelect}
+            onSelectAll={() => {
+              const allSelected = pageProfiles.every((p) => selectedIds.has(p.id))
+              if (allSelected) {
+                // Bỏ chọn đúng các hồ sơ trên trang hiện tại
+                const keep = [...selectedIds].filter(
+                  (id) => !pageProfiles.some((p) => p.id === id)
+                )
+                selectAll(keep)
+              } else {
+                const merged = new Set(selectedIds)
+                for (const p of pageProfiles) merged.add(p.id)
+                selectAll([...merged])
+              }
+            }}
+            onSelectIds={selectAll}
+            onLaunch={(id) => void handleLaunch([id])}
+            onStop={(id) => void handleStop([id])}
+            onWipe={(id) => void handleWipeProfile(id)}
+            onToggleRestore={(groupId, enabled) =>
+              void updateGroup(groupId, { restoreLastSession: enabled })
+            }
+            onEdit={openEdit}
+            onDelete={(id) => void confirmDelete([id])}
+          />
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink-soft">
+            <div>
+              Hiển thị{' '}
+              <span className="font-medium text-ink">
+                {rangeFrom}–{rangeTo}
+              </span>{' '}
+              / <span className="font-medium text-ink">{profiles.length}</span> hồ sơ
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-ink-muted">
+                <span className="whitespace-nowrap">Mỗi trang</span>
+                <select
+                  className="input !w-auto !py-1.5 !text-sm"
+                  value={pageSize}
+                  onChange={(e) => commitPageSize(Number(e.target.value) as ProfilePageSize)}
+                >
+                  {PROFILE_PAGE_SIZE_OPTIONS.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  Trước
+                </button>
+                <span className="min-w-[5.5rem] px-1 text-center text-ink">
+                  {safePage}/{totalPages}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  Sau
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
 
       <ProfileFormModal

@@ -138,12 +138,16 @@ export function SettingsPage(): JSX.Element {
               className="input"
               type="number"
               min={1}
-              max={20}
+              max={25}
               value={form.maxConcurrentLaunches}
               onChange={(e) =>
-                setForm({ ...form, maxConcurrentLaunches: Number(e.target.value) || 1 })
+                setForm({
+                  ...form,
+                  maxConcurrentLaunches: Math.min(25, Math.max(1, Number(e.target.value) || 1))
+                })
               }
             />
+            <div className="mt-1 text-[11px] text-ink-muted">Tối đa 25 hồ sơ cùng lúc</div>
           </div>
         </div>
 

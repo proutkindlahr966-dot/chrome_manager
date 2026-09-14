@@ -40,6 +40,7 @@ export interface AppApi {
     loginGmailBulk: (ids: string[]) => Promise<BulkResult>
     tileLayout: (count: number) => Promise<WindowBounds[]>
     arrangeWindows: (ids: string[]) => Promise<boolean>
+    maximizeWindows: (ids: string[]) => Promise<boolean>
     loadGmailList: () => Promise<{ content: string; path: string }>
     saveGmailList: (content: string) => Promise<{ path: string; count: number }>
     loadFailedGmailEmails: () => Promise<string[]>

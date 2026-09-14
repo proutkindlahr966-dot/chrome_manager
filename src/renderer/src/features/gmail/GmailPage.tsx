@@ -13,7 +13,13 @@ import {
   Trash2,
   XCircle
 } from 'lucide-react'
-import type { ChromeProfile, GmailCredentials, ImagePreview, WindowBounds } from '@shared/types'
+import type {
+  ChromeProfile,
+  FormLinkStyle,
+  GmailCredentials,
+  ImagePreview,
+  WindowBounds
+} from '@shared/types'
 import { DEFAULT_GMAIL_POST_SETUP } from '@shared/types'
 import { hasGmailCredentials, normalizeEmailKey, parseGmailList } from '@shared/gmail'
 import { PageHeader } from '@/components/layout/PageHeader'
@@ -74,6 +80,9 @@ export function GmailPage(): JSX.Element {
   const [formTitle, setFormTitle] = useState('')
   const [formDescription, setFormDescription] = useState('')
   const [formHeaderPath, setFormHeaderPath] = useState('')
+  const [formLinkStyle, setFormLinkStyle] = useState<FormLinkStyle>(
+    DEFAULT_GMAIL_POST_SETUP.formLinkStyle
+  )
   const [formHeaderPreview, setFormHeaderPreview] = useState<ImagePreview | null>(null)
   const [savingSetup, setSavingSetup] = useState(false)
   const stopRef = useRef(false)
@@ -211,6 +220,7 @@ export function GmailPage(): JSX.Element {
       setFormTitle(setup.formTitle || '')
       setFormDescription(setup.formDescription || '')
       setFormHeaderPath(setup.formHeaderPath || '')
+      setFormLinkStyle(setup.formLinkStyle === 'long' ? 'long' : 'short')
       if (
         setup.avatarPath ||
         setup.appsScriptPath ||
@@ -219,7 +229,7 @@ export function GmailPage(): JSX.Element {
       ) {
         pushLog(
           'info',
-          `Đã tải cấu hình post-login (ảnh: ${setup.avatarPath ? 'có' : 'chưa'} · header Form: ${setup.formHeaderPath ? 'có' : 'chưa'} · script: ${setup.appsScriptPath || (setup.appsScriptCode.trim() ? 'inline cũ' : 'chưa')} · form: ${setup.formFillEnabled ? 'bật' : 'tắt'}).`
+          `Đã tải cấu hình post-login (ảnh: ${setup.avatarPath ? 'có' : 'chưa'} · header Form: ${setup.formHeaderPath ? 'có' : 'chưa'} · script: ${setup.appsScriptPath || (setup.appsScriptCode.trim() ? 'inline cũ' : 'chưa')} · form: ${setup.formFillEnabled ? 'bật' : 'tắt'} · link: ${setup.formLinkStyle === 'long' ? 'dài' : 'ngắn'}).`
         )
       }
     } catch {
@@ -239,7 +249,8 @@ export function GmailPage(): JSX.Element {
         formFillEnabled,
         formTitle,
         formDescription,
-        formHeaderPath
+        formHeaderPath,
+        formLinkStyle
       })
       setAvatarPath(result.config.avatarPath)
       setAppsScriptPath(result.config.appsScriptPath)
@@ -248,6 +259,7 @@ export function GmailPage(): JSX.Element {
       setFormTitle(result.config.formTitle)
       setFormDescription(result.config.formDescription)
       setFormHeaderPath(result.config.formHeaderPath)
+      setFormLinkStyle(result.config.formLinkStyle === 'long' ? 'long' : 'short')
       pushLog('success', `Đã lưu cấu hình post-login → ${result.path}`)
     } catch (error) {
       pushLog(
@@ -373,16 +385,13 @@ export function GmailPage(): JSX.Element {
   }, [groups, groupId])
 
   useEffect(() => {
-    const max = settings?.maxConcurrentLaunches
-    if (!max || max <= 0) return
     setThreadsInput((prev) => {
       const current = clampThreads(Number(prev) || THREADS_MIN)
-      const next = Math.min(current, max)
-      if (next === current) return prev
-      persistThreads(next)
-      return String(next)
+      if (String(current) === prev) return prev
+      persistThreads(current)
+      return String(current)
     })
-  }, [settings?.maxConcurrentLaunches])
+  }, [])
 
   const gmailQueue = useMemo(() => parseGmailList(listText), [listText])
 
@@ -520,6 +529,21 @@ export function GmailPage(): JSX.Element {
   const safeThreads = clampThreads(Number(threadsInput) || THREADS_MIN)
   const parallelNow = Math.min(safeThreads, willUse)
 
+  /** Lý do chưa chạy được — hiện cạnh nút thay vì chỉ disable im lặng */
+  const runBlockedReason = !groupId
+    ? 'Hãy chọn nhóm trước.'
+    : groupProfiles.length === 0
+      ? 'Nhóm này chưa có hồ sơ.'
+      : gmailQueue.length === 0
+        ? 'Dán danh sách Gmail (mỗi dòng: mail|pass|2fa).'
+        : availableQueue.length === 0
+          ? 'Mọi mail trong list đã gắn hồ sơ — bấm «Mail đã login» để gỡ, hoặc dán mail mới.'
+          : mailKind === 'old' && emptySlots.length === 0
+            ? 'Nhóm đã đầy (mọi hồ sơ đã có Gmail) — bấm «Xóa Gmail» nếu muốn đổ lại.'
+            : willUse === 0
+              ? 'Không có cặp profile ↔ mail để chạy.'
+              : null
+
   function commitThreadsInput(raw: string): void {
     const next = clampThreads(Number(raw) || THREADS_MIN)
     setThreadsInput(String(next))
@@ -623,22 +647,6 @@ export function GmailPage(): JSX.Element {
         return { email: gmail.email, filled: false, skipped: true, isRobot: false, alreadyUsed: true }
       }
 
-      // Lưu setup ngay trước login để main đọc fallback từ file nếu cần
-      if (postSetupEnabled) {
-        await window.api.profiles
-          .saveGmailSetup({
-            enabled: true,
-            avatarPath,
-            appsScriptPath,
-            appsScriptCode: '',
-            formFillEnabled,
-            formTitle,
-            formDescription,
-            formHeaderPath
-          })
-          .catch(() => undefined)
-      }
-
       // Không gắn Gmail vào hồ sơ trước — chỉ lưu khi main xác nhận đã vào inbox
       const result = await window.api.profiles.loginGmail(profile.id, {
         windowBounds,
@@ -652,7 +660,8 @@ export function GmailPage(): JSX.Element {
         formFillEnabled,
         formTitle: formTitle || undefined,
         formDescription: formDescription || undefined,
-        formHeaderPath: formHeaderPath || undefined
+        formHeaderPath: formHeaderPath || undefined,
+        formLinkStyle
       })
 
       if (result.success) {
@@ -761,12 +770,17 @@ export function GmailPage(): JSX.Element {
       }
 
       markEmailFailed(gmail.email)
+      await reloadProfiles().catch(() => undefined)
 
       return { email: gmail.email, filled: false, skipped, isRobot }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Không rõ'
       pushLog('error', `${listLine ? `Dòng ${listLine} · ` : ''}Mail lỗi ${gmail.email}: ${msg}`)
       markEmailFailed(gmail.email)
+      await updateProfile(profile.id, {
+        notes: `Login lỗi: ${gmail.email} — ${msg}`.slice(0, 800)
+      }).catch(() => undefined)
+      await reloadProfiles().catch(() => undefined)
       return { email: gmail.email, filled: false, skipped: false, isRobot: false }
     }
   }
@@ -851,7 +865,8 @@ export function GmailPage(): JSX.Element {
         formFillEnabled,
         formTitle,
         formDescription,
-        formHeaderPath
+        formHeaderPath,
+        formLinkStyle
       })
     } catch {
       // ignore
@@ -940,6 +955,8 @@ export function GmailPage(): JSX.Element {
           `Đợt ${wave}/${Math.ceil(allTargets.length / safeThreads)}: ${pending.length} luồng — chờ tất cả thành công rồi mới sang đợt sau.`
         )
 
+        const waveDoneIds: string[] = []
+
         // Trong đợt: chạy → lỗi thì thay mail → chạy lại các profile còn pending
         while (!stopRef.current && pending.length > 0) {
           const batch: WorkItem[] = pending.map((s, i) => ({
@@ -961,16 +978,22 @@ export function GmailPage(): JSX.Element {
               .join(', ')}`
           )
 
-          const STAGGER_MS = 2800
-          const results = await Promise.all(
+          const STAGGER_MS = 1800
+          const settled = await Promise.allSettled(
             batch.map((item, i) =>
               processOne(item, allTargets.length, i * STAGGER_MS)
             )
           )
-
-          await window.api.profiles
-            .arrangeWindows(batch.map((b) => b.profile.id))
-            .catch(() => undefined)
+          const results = settled.map((s, i) =>
+            s.status === 'fulfilled'
+              ? s.value
+              : {
+                  email: batch[i].gmail.email,
+                  filled: false,
+                  skipped: false,
+                  isRobot: false
+                }
+          )
 
           const stillPending: SlotState[] = []
           for (let i = 0; i < results.length; i++) {
@@ -979,6 +1002,7 @@ export function GmailPage(): JSX.Element {
             if (r.filled) {
               successEmails.push(r.email)
               filledNow += 1
+              waveDoneIds.push(slot.profile.id)
               continue
             }
 
@@ -1023,9 +1047,12 @@ export function GmailPage(): JSX.Element {
           }
 
           if (pending.length > 0 && !stopRef.current) {
+            await window.api.profiles
+              .arrangeWindows(pending.map((s) => s.profile.id))
+              .catch(() => undefined)
             pushLog(
               'info',
-              `Đợt ${wave}: còn ${pending.length}/${waveProfiles.length} profile chưa OK — chạy lại trước khi sang đợt sau.`
+              `Đợt ${wave}: còn ${pending.length}/${waveProfiles.length} profile chưa OK — chia lại cửa sổ rồi chạy lại.`
             )
           }
         }
@@ -1035,8 +1062,12 @@ export function GmailPage(): JSX.Element {
           break
         }
 
-        if (pending.length === 0) {
-          pushLog('success', `Đợt ${wave}: đủ ${waveProfiles.length} luồng xong — sang profile tiếp theo.`)
+        if (pending.length === 0 && waveDoneIds.length > 0) {
+          await window.api.profiles.maximizeWindows(waveDoneIds).catch(() => undefined)
+          pushLog(
+            'success',
+            `Đợt ${wave}: ${waveDoneIds.length} luồng xong — phóng to cửa sổ, sang đợt tiếp theo (chia ô theo số luồng).`
+          )
         }
       }
 
@@ -1091,7 +1122,8 @@ export function GmailPage(): JSX.Element {
         formFillEnabled,
         formTitle,
         formDescription,
-        formHeaderPath
+        formHeaderPath,
+        formLinkStyle
       })
     } catch {
       // ignore
@@ -1159,14 +1191,20 @@ export function GmailPage(): JSX.Element {
             .join(', ')}`
         )
 
-        const STAGGER_MS = 2800
-        const results = await Promise.all(
+        const STAGGER_MS = 1800
+        const settled = await Promise.allSettled(
           batch.map((item, i) => processOne(item, pairs.length, i * STAGGER_MS))
         )
-
-        await window.api.profiles
-          .arrangeWindows(runnable.map((b) => b.profile.id))
-          .catch(() => undefined)
+        const results = settled.map((s, i) =>
+          s.status === 'fulfilled'
+            ? s.value
+            : {
+                email: batch[i].gmail.email,
+                filled: false,
+                skipped: false,
+                isRobot: false
+              }
+        )
 
         for (const r of results) {
           if (r.filled) {
@@ -1177,6 +1215,18 @@ export function GmailPage(): JSX.Element {
           } else {
             runFailed.push(r.email)
           }
+        }
+
+        const doneIds = results
+          .map((r, i) => (r.filled ? batch[i].profile.id : null))
+          .filter((id): id is string => Boolean(id))
+        if (doneIds.length > 0) {
+          await window.api.profiles.maximizeWindows(doneIds).catch(() => undefined)
+          pushLog(
+            'success',
+            `Batch dòng ${slice[0].listLine}–${slice[slice.length - 1].listLine}: ${doneIds.length} cửa sổ phóng to` +
+              (offset < pairs.length ? ' — đợt tiếp theo chia ô theo số luồng.' : '.')
+          )
         }
 
         if (runFailed.length) {
@@ -1317,60 +1367,68 @@ export function GmailPage(): JSX.Element {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={running || clearing || !groupId || willUse === 0}
-              onClick={() => void runParallelLogin()}
-            >
-              <Layers size={16} />
-              {running
-                ? `Đang chạy ${safeThreads} luồng...`
-                : `Chạy ${parallelNow} luồng`}
-            </button>
-            {running ? (
+          <div className="flex flex-col items-stretch gap-2 lg:items-end">
+            <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={running || clearing}
+                title={runBlockedReason ?? undefined}
+                onClick={() => void runParallelLogin()}
+              >
+                <Layers size={16} />
+                {running
+                  ? `Đang chạy ${safeThreads} luồng...`
+                  : parallelNow > 0
+                    ? `Chạy ${parallelNow} luồng`
+                    : 'Chạy luồng'}
+              </button>
+              {running ? (
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={() => {
+                    stopRef.current = true
+                    pushLog('warn', 'Đang yêu cầu dừng sau batch hiện tại...')
+                  }}
+                >
+                  <Square size={16} />
+                  Dừng
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn-danger"
-                onClick={() => {
-                  stopRef.current = true
-                  pushLog('warn', 'Đang yêu cầu dừng sau batch hiện tại...')
-                }}
+                disabled={running || clearing || !groupId || filledProfiles.length === 0}
+                onClick={() => void clearGroupGmail()}
               >
-                <Square size={16} />
-                Dừng
+                <Eraser size={16} />
+                {clearing ? 'Đang xóa...' : `Xóa Gmail (${filledProfiles.length})`}
               </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={clearing || running || duplicateInList.length === 0}
+                onClick={() => removeLoggedInEmailsFromList()}
+                title="Gỡ các mail đã đăng nhập thành công (đã gắn hồ sơ) khỏi danh sách"
+              >
+                <CheckCircle2 size={16} />
+                Mail đã login ({duplicateInList.length})
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={clearing || failedEmails.length === 0}
+                onClick={() => removeFailedEmailsFromList()}
+                title="Gỡ các mail đã chạy lỗi / robot / bỏ qua khỏi danh sách"
+              >
+                <XCircle size={16} />
+                Mail lỗi ({failedEmails.length})
+              </button>
+            </div>
+            {!running && !clearing && runBlockedReason ? (
+              <p className="max-w-xl text-xs text-warning lg:text-right">{runBlockedReason}</p>
             ) : null}
-            <button
-              type="button"
-              className="btn-danger"
-              disabled={running || clearing || !groupId || filledProfiles.length === 0}
-              onClick={() => void clearGroupGmail()}
-            >
-              <Eraser size={16} />
-              {clearing ? 'Đang xóa...' : `Xóa Gmail (${filledProfiles.length})`}
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={clearing || running || duplicateInList.length === 0}
-              onClick={() => removeLoggedInEmailsFromList()}
-              title="Gỡ các mail đã đăng nhập thành công (đã gắn hồ sơ) khỏi danh sách"
-            >
-              <CheckCircle2 size={16} />
-              Mail đã login ({duplicateInList.length})
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={clearing || failedEmails.length === 0}
-              onClick={() => removeFailedEmailsFromList()}
-              title="Gỡ các mail đã chạy lỗi / robot / bỏ qua khỏi danh sách"
-            >
-              <XCircle size={16} />
-              Mail lỗi ({failedEmails.length})
-            </button>
           </div>
         </div>
       </div>
@@ -1444,7 +1502,8 @@ export function GmailPage(): JSX.Element {
                 <h2 className="font-display text-base font-semibold text-ink">Sau khi login</h2>
                 <p className="mt-0.5 text-xs text-ink-muted">
                   Login OK là đã gán mail vào profile → mở 2fa.live (cột 3). Tùy chọn thêm: Đổi
-                  ảnh → Sheet → Form (tiêu đề/mô tả/header) → Publish lấy link → Apps Script.
+                  ảnh → Form (tiêu đề/mô tả/header/màu) → Publish lấy link → Sheet → ô Menus →
+                  Apps Script.
                 </p>
               </div>
               <label className="flex items-center gap-2 text-sm text-ink-soft">
@@ -1544,6 +1603,26 @@ export function GmailPage(): JSX.Element {
                   Trong file có thể dùng <code className="font-mono">[LINK_SHEET]</code> và{' '}
                   <code className="font-mono">[LINK_FORM]</code> — app sẽ thay bằng URL Sheet /
                   Form (sau Publish).
+                </p>
+              </div>
+
+              <div>
+                <label className="label">Link Form sau Publish</label>
+                <select
+                  className="input"
+                  disabled={running || !postSetupEnabled}
+                  value={formLinkStyle}
+                  onChange={(e) =>
+                    setFormLinkStyle(e.target.value === 'long' ? 'long' : 'short')
+                  }
+                >
+                  <option value="short">Link ngắn (forms.gle/…)</option>
+                  <option value="long">Link dài (docs.google.com/forms/…/viewform)</option>
+                </select>
+                <p className="mt-1 text-[11px] text-ink-muted">
+                  {formLinkStyle === 'short'
+                    ? 'Publish → Publish trong hộp thoại → tick Shorten URL → Copy (forms.gle).'
+                    : 'Publish → Publish trong hộp thoại → Copy (không tick Shorten URL).'}
                 </p>
               </div>
 
@@ -1700,13 +1779,15 @@ export function GmailPage(): JSX.Element {
                   <span className="font-medium text-ink-soft">{newMailPairs.length}</span> dòng
                   Gmail = số cặp 1–1 với profile trong nhóm (tối đa {groupProfiles.length}{' '}
                   profile). Mỗi batch tối đa{' '}
-                  <span className="font-medium text-ink-soft">{safeThreads}</span> Chrome.
+                  <span className="font-medium text-ink-soft">{safeThreads}</span> Chrome — login và
+                  post-setup chạy song song.
                 </>
               ) : (
                 <>
                   Mail cũ: mỗi đợt{' '}
                   <span className="font-medium text-ink-soft">{safeThreads}</span> luồng phải login
-                  OK hết (mail lỗi → thay dòng tiếp) rồi mới sang profile tiếp theo. Lần đầu{' '}
+                  OK hết (mail lỗi → thay dòng tiếp) rồi mới sang profile tiếp theo. Login và
+                  post-setup chạy song song. Lần đầu{' '}
                   <span className="font-medium text-ink-soft">{oldMailInitialPairs.length}</span>{' '}
                   cặp.
                 </>

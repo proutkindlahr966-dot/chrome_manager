@@ -146,6 +146,8 @@ export interface LaunchOptions {
   skipHomepage?: boolean
   skipAutoLogin?: boolean
   windowBounds?: WindowBounds
+  /** Mở tay: phóng to toàn màn hình (không chia ô) */
+  startMaximized?: boolean
 }
 
 export interface GmailLoginOptions {
@@ -177,7 +179,12 @@ export interface GmailLoginOptions {
   formDescription?: string
   /** Ảnh header Google Form (upload qua Customize theme) */
   formHeaderPath?: string
+  /** Link Form sau Publish: short = forms.gle · long = docs.google.com/.../viewform */
+  formLinkStyle?: FormLinkStyle
 }
+
+/** Kiểu link công khai sau Publish Form */
+export type FormLinkStyle = 'short' | 'long'
 
 export interface GmailPostSetupConfig {
   enabled: boolean
@@ -194,6 +201,8 @@ export interface GmailPostSetupConfig {
   formDescription: string
   /** Ảnh header Form (Customize theme → Header → Upload) */
   formHeaderPath: string
+  /** Link Form khi Publish: ngắn (forms.gle) hoặc dài (viewform) */
+  formLinkStyle: FormLinkStyle
 }
 
 export const DEFAULT_GMAIL_POST_SETUP: GmailPostSetupConfig = {
@@ -204,7 +213,8 @@ export const DEFAULT_GMAIL_POST_SETUP: GmailPostSetupConfig = {
   formFillEnabled: false,
   formTitle: '',
   formDescription: '',
-  formHeaderPath: ''
+  formHeaderPath: '',
+  formLinkStyle: 'short'
 }
 
 /** Xem trước ảnh trong renderer — dataUrl rỗng khi file quá lớn */
@@ -266,11 +276,29 @@ export const DEFAULT_USER_AGENT =
 
 export const GROUP_COLORS = [
   '#0F766E',
+  '#0D9488',
+  '#155E75',
   '#0369A1',
+  '#0284C7',
+  '#1D4ED8',
+  '#4338CA',
   '#7C3AED',
+  '#9333EA',
+  '#C026D3',
   '#BE185D',
+  '#E11D48',
+  '#DC2626',
   '#C2410C',
-  '#4D7C0F',
+  '#EA580C',
+  '#D97706',
   '#A16207',
-  '#475569'
+  '#CA8A04',
+  '#4D7C0F',
+  '#16A34A',
+  '#059669',
+  '#475569',
+  '#334155',
+  '#57534E',
+  '#78716C',
+  '#9F1239'
 ] as const

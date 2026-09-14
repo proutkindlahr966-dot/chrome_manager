@@ -1,6 +1,6 @@
 const THREADS_STORAGE_KEY = 'gmail-chrome-threads'
 export const THREADS_MIN = 1
-export const THREADS_MAX = 20
+export const THREADS_MAX = 25
 
 export function loadSavedThreads(): number {
   try {

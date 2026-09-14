@@ -19,6 +19,7 @@ import {
   computeTileLayout,
   detectChromePath,
   launchProfile,
+  maximizeProfileWindows,
   stopProfile
 } from './chrome.service'
 import { hasGmailCredentials } from '../../shared/gmail'
@@ -135,7 +136,10 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  ipcMain.handle(IPC.PROFILES_LAUNCH, (_e, id: string) => launchProfile(id))
+  ipcMain.handle(IPC.PROFILES_LAUNCH, async (_e, id: string) => {
+    const result = await launchProfile(id, { startMaximized: true })
+    return result
+  })
   ipcMain.handle(IPC.PROFILES_STOP, (_e, id: string) => stopProfile(id))
   ipcMain.handle(IPC.PROFILES_BULK_LAUNCH, (_e, ids: string[]) => bulkLaunch(ids))
   ipcMain.handle(IPC.PROFILES_BULK_STOP, (_e, ids: string[]) => bulkStop(ids))
@@ -150,6 +154,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.PROFILES_TILE_LAYOUT, (_e, count: number) => computeTileLayout(count))
   ipcMain.handle(IPC.PROFILES_ARRANGE_WINDOWS, async (_e, ids: string[]) => {
     await arrangeProfileWindows(ids)
+    return true
+  })
+  ipcMain.handle(IPC.PROFILES_MAXIMIZE_WINDOWS, async (_e, ids: string[]) => {
+    await maximizeProfileWindows(ids)
     return true
   })
 
@@ -255,7 +263,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.GROUPS_UPDATE, (_e, id: string, input: UpdateGroupInput) =>
     db.updateGroup(id, input)
   )
-  ipcMain.handle(IPC.GROUPS_DELETE, (_e, id: string) => {
+  ipcMain.handle(IPC.GROUPS_DELETE, async (_e, id: string) => {
+    const profiles = db.listProfiles().filter((p) => p.groupId === id)
+    for (const profile of profiles) {
+      await stopProfile(profile.id)
+    }
     db.deleteGroup(id)
     return true
   })

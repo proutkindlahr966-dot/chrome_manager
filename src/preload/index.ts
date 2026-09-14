@@ -55,6 +55,8 @@ const api = {
       ipcRenderer.invoke(IPC.PROFILES_TILE_LAYOUT, count),
     arrangeWindows: (ids: string[]): Promise<boolean> =>
       ipcRenderer.invoke(IPC.PROFILES_ARRANGE_WINDOWS, ids),
+    maximizeWindows: (ids: string[]): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.PROFILES_MAXIMIZE_WINDOWS, ids),
     loadGmailList: (): Promise<{ content: string; path: string }> =>
       ipcRenderer.invoke(IPC.GMAIL_LIST_LOAD),
     saveGmailList: (content: string): Promise<{ path: string; count: number }> =>

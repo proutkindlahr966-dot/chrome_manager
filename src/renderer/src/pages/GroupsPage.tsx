@@ -7,14 +7,21 @@ import { Switch } from '@/components/ui/Switch'
 import { useAppStore } from '@/stores/app-store'
 import { askConfirm, toast } from '@/stores/ui-store'
 import { GROUP_COLORS, type ProfileGroup } from '@shared/types'
-import { formatDate } from '@/lib/utils'
+import {
+  DEFAULT_PROFILE_PREFIX,
+  formatDate,
+  formatProfileName,
+  suggestNextIndex
+} from '@/lib/utils'
 
 export function GroupsPage(): JSX.Element {
   const groups = useAppStore((s) => s.groups)
   const profiles = useAppStore((s) => s.profiles)
   const createGroup = useAppStore((s) => s.createGroup)
+  const createProfiles = useAppStore((s) => s.createProfiles)
   const updateGroup = useAppStore((s) => s.updateGroup)
   const deleteGroup = useAppStore((s) => s.deleteGroup)
+  const settings = useAppStore((s) => s.settings)
 
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -23,6 +30,7 @@ export function GroupsPage(): JSX.Element {
   const [description, setDescription] = useState('')
   const [color, setColor] = useState<string>(GROUP_COLORS[0])
   const [restoreLastSession, setRestoreLastSession] = useState(true)
+  const [profileCount, setProfileCount] = useState(0)
 
   const profileCountByGroup = useMemo(() => {
     const map = new Map<string, number>()
@@ -33,12 +41,29 @@ export function GroupsPage(): JSX.Element {
     return map
   }, [profiles])
 
+  // Giống ProfileFormModal: tiền tố = tên nhóm, số bắt đầu từ 1 (nhóm mới)
+  const namePrefix = name.trim() || DEFAULT_PROFILE_PREFIX
+  const safeProfileCount = Math.min(500, Math.max(0, Math.floor(profileCount) || 0))
+  const startIndex = 1
+  const namePad = Math.max(2, String(startIndex + Math.max(safeProfileCount, 1) - 1).length)
+  const previewNames = useMemo(() => {
+    if (safeProfileCount <= 0) return []
+    const samples = Array.from({ length: Math.min(3, safeProfileCount) }, (_, i) =>
+      formatProfileName(namePrefix, startIndex + i, namePad)
+    )
+    if (safeProfileCount > 3) {
+      samples.push(`… ${formatProfileName(namePrefix, startIndex + safeProfileCount - 1, namePad)}`)
+    }
+    return samples
+  }, [safeProfileCount, namePrefix, namePad])
+
   function openCreate(): void {
     setEditing(null)
     setName('')
     setDescription('')
     setColor(GROUP_COLORS[groups.length % GROUP_COLORS.length])
     setRestoreLastSession(true)
+    setProfileCount(0)
     setOpen(true)
   }
 
@@ -48,6 +73,7 @@ export function GroupsPage(): JSX.Element {
     setDescription(group.description)
     setColor(group.color)
     setRestoreLastSession(group.restoreLastSession !== false)
+    setProfileCount(0)
     setOpen(true)
   }
 
@@ -60,8 +86,33 @@ export function GroupsPage(): JSX.Element {
         await updateGroup(editing.id, { name, description, color, restoreLastSession })
         toast({ tone: 'success', title: 'Đã cập nhật nhóm' })
       } else {
-        await createGroup({ name, description, color, restoreLastSession })
-        toast({ tone: 'success', title: 'Đã tạo nhóm' })
+        const group = await createGroup({ name, description, color, restoreLastSession })
+        const count = Math.min(500, Math.max(0, Math.floor(profileCount) || 0))
+        if (count > 0) {
+          // Cùng logic đặt tên với form Tạo hồ sơ (Hồ sơ)
+          const nextPrefix = group.name.trim() || DEFAULT_PROFILE_PREFIX
+          const all = await window.api.profiles.list()
+          const scoped = all.filter((p) => p.groupId === group.id)
+          const next = suggestNextIndex(
+            scoped.map((p) => p.name),
+            nextPrefix
+          )
+          await createProfiles({
+            name: nextPrefix,
+            groupId: group.id,
+            userAgent: settings?.defaultUserAgent ?? '',
+            homepage: 'chrome://newtab/',
+            count,
+            startIndex: next
+          })
+          toast({
+            tone: 'success',
+            title: 'Đã tạo nhóm',
+            description: `Đã tạo ${count} hồ sơ trong nhóm.`
+          })
+        } else {
+          toast({ tone: 'success', title: 'Đã tạo nhóm' })
+        }
       }
       setOpen(false)
     } catch (error) {
@@ -133,13 +184,21 @@ export function GroupsPage(): JSX.Element {
                       onClick={async () => {
                         const ok = await askConfirm({
                           title: `Xóa nhóm "${group.name}"?`,
-                          description: 'Hồ sơ trong nhóm sẽ chuyển sang trạng thái chưa nhóm.',
+                          description:
+                            count > 0
+                              ? `Sẽ xóa vĩnh viễn ${count} hồ sơ trong nhóm (kèm dữ liệu Chrome). Không thể hoàn tác.`
+                              : 'Nhóm này không có hồ sơ. Bạn có chắc muốn xóa?',
                           confirmLabel: 'Xóa nhóm',
                           danger: true
                         })
                         if (!ok) return
                         await deleteGroup(group.id)
-                        toast({ tone: 'success', title: 'Đã xóa nhóm' })
+                        toast({
+                          tone: 'success',
+                          title: 'Đã xóa nhóm',
+                          description:
+                            count > 0 ? `Đã xóa ${count} hồ sơ trong nhóm.` : undefined
+                        })
                       }}
                     >
                       <Trash2 size={15} />
@@ -179,6 +238,40 @@ export function GroupsPage(): JSX.Element {
             <label className="label">Tên nhóm</label>
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
           </div>
+          {!editing && (
+            <>
+              <div>
+                <label className="label">Số lượng hồ sơ</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  max={500}
+                  value={profileCount}
+                  onChange={(e) => setProfileCount(Number(e.target.value))}
+                />
+                <p className="mt-1.5 text-xs text-ink-muted">
+                  Nhập 0 nếu chỉ tạo nhóm trống. Tên hồ sơ tự động giống trang Hồ sơ.
+                </p>
+              </div>
+              {safeProfileCount > 0 && (
+                <div className="rounded-xl border border-line bg-surface-muted/40 p-4">
+                  <div className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-muted">
+                    Tên tự động
+                  </div>
+                  <div className="font-mono text-sm text-ink">
+                    {previewNames.join(' · ') ||
+                      formatProfileName(namePrefix, startIndex, namePad)}
+                  </div>
+                  <div className="mt-2 text-xs text-ink-muted">
+                    Tiền tố <span className="font-medium text-ink-soft">{namePrefix}</span>, bắt
+                    đầu từ <span className="font-medium text-ink-soft">{startIndex}</span> (theo
+                    hồ sơ trong nhóm)
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           <div>
             <label className="label">Mô tả</label>
             <textarea

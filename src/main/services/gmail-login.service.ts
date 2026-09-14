@@ -73,6 +73,36 @@ class SkipLoginError extends Error {
   }
 }
 
+const LOGIN_ERROR_NOTE_PREFIX = 'Login lỗi:'
+
+/** Ghi / xóa lỗi đăng nhập vào cột Ghi chú của hồ sơ */
+function writeLoginNoteToProfile(
+  profileId: string,
+  errorOrClear: string | null,
+  email?: string
+): void {
+  try {
+    const db = getDb()
+    const current = db.getProfile(profileId)
+    if (!current) return
+
+    if (errorOrClear === null) {
+      // Chỉ xóa ghi chú lỗi login cũ — giữ ghi chú thủ công khác
+      if (current.notes.trim().toLowerCase().startsWith(LOGIN_ERROR_NOTE_PREFIX.toLowerCase())) {
+        db.updateProfile(profileId, { notes: '' })
+      }
+      return
+    }
+
+    const cleaned = errorOrClear.replace(/^\[BỎ QUA\]\s*/i, '').trim()
+    const mailPart = email?.trim() ? `${email.trim()} — ` : ''
+    const note = `${LOGIN_ERROR_NOTE_PREFIX} ${mailPart}${cleaned}`.slice(0, 800)
+    db.updateProfile(profileId, { notes: note })
+  } catch {
+    // ignore — không làm fail luồng login vì ghi chú
+  }
+}
+
 function loginDebugLog(message: string, extra?: unknown): void {
   try {
     const ctx = loginLogContext.getStore()
@@ -126,6 +156,20 @@ async function generateTotp(secret: string): Promise<string> {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms))
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /** Số ngẫu nhiên trong [min, max] — dùng để nhập giống người */
@@ -2194,20 +2238,24 @@ export async function loginGmailForProfile(
 
   const gmail = normalizeGmail(options?.credentials) ?? profile.gmail
   if (!hasGmailCredentials(gmail)) {
+    const error = 'Hồ sơ chưa có thông tin Gmail (cần email và mật khẩu).'
+    writeLoginNoteToProfile(profileId, error)
     return {
       profileId,
       success: false,
-      error: 'Hồ sơ chưa có thông tin Gmail (cần email và mật khẩu).'
+      error
     }
   }
 
   // 1 mail chỉ 1 profile (mọi nhóm)
   const conflict = db.findProfileByGmailEmail(gmail!.email)
   if (conflict && conflict.id !== profileId) {
+    const error = `[BỎ QUA] Email ${gmail!.email} đã gắn hồ sơ "${conflict.name}" — không đăng nhập lại.`
+    writeLoginNoteToProfile(profileId, error, gmail!.email)
     return {
       profileId,
       success: false,
-      error: `[BỎ QUA] Email ${gmail!.email} đã gắn hồ sơ "${conflict.name}" — không đăng nhập lại.`
+      error
     }
   }
 
@@ -2230,7 +2278,9 @@ export async function loginGmailForProfile(
         windowBounds: options?.windowBounds
       })
       if (!launched.success) {
-        return { profileId, success: false, error: launched.error || 'Không mở được Chrome' }
+        const error = launched.error || 'Không mở được Chrome'
+        writeLoginNoteToProfile(profileId, error, gmail!.email)
+        return { profileId, success: false, error }
       }
     } else if (options?.windowBounds) {
       await applyWindowBounds(profileId, options.windowBounds)
@@ -2238,7 +2288,9 @@ export async function loginGmailForProfile(
 
     const port = getDebugPort(profileId)
     if (!port) {
-      return { profileId, success: false, error: 'Không có cổng remote debugging của Chrome' }
+      const error = 'Không có cổng remote debugging của Chrome'
+      writeLoginNoteToProfile(profileId, error, gmail!.email)
+      return { profileId, success: false, error }
     }
 
     const puppeteer = (await import('puppeteer-core')).default
@@ -2279,6 +2331,8 @@ export async function loginGmailForProfile(
       gmail,
       autoLoginGmail
     })
+    // Xóa ghi chú lỗi login cũ (nếu có) sau khi đăng nhập thành công
+    writeLoginNoteToProfile(profileId, null)
 
     await delay(1200)
 
@@ -2307,8 +2361,14 @@ export async function loginGmailForProfile(
     const formTitle = (options?.formTitle ?? savedSetup.formTitle ?? '').trim()
     const formDescription = (options?.formDescription ?? savedSetup.formDescription ?? '').trim()
     const formHeaderPath = (options?.formHeaderPath ?? savedSetup.formHeaderPath ?? '').trim()
+    const formLinkStyle =
+      options?.formLinkStyle === 'long' || options?.formLinkStyle === 'short'
+        ? options.formLinkStyle
+        : savedSetup.formLinkStyle === 'long'
+          ? 'long'
+          : 'short'
 
-    // Ngay sau login OK: mở 2fa.live trước, rồi mới chạy post-setup
+    // Login + post-setup chạy song song giữa các luồng (clipboard Copy vẫn khóa từng thao tác)
     keepExtraTabs = true
     try {
       emitLoginProgress('Mở 2fa.live và lấy mã')
@@ -2326,26 +2386,32 @@ export async function loginGmailForProfile(
 
     if (shouldPostSetup) {
       keepExtraTabs = true
-      emitLoginProgress('Bắt đầu post-setup (avatar → Sheet → Form/Publish → Apps Script)')
+      emitLoginProgress('Bắt đầu post-setup (avatar → Form/Publish → Sheet → ô Menus → Apps Script)')
       try {
-        const steps = await runPostLoginSetup(
-          browser,
-          {
-            avatarPath,
-            appsScriptPath,
-            appsScriptCode,
-            totpSecret: resolveTotpSecret(gmail) || profile.gmail?.totpSecret || undefined,
-            formFillEnabled,
-            formTitle,
-            formDescription,
-            formHeaderPath: formHeaderPath || undefined
-          },
-          (step) => {
-            emitLoginProgress(
-              `[${step.ok ? 'OK' : 'WARN'} ${step.step}] ${step.detail}`,
-              step.ok ? 'success' : 'warn'
-            )
-          }
+        const steps = await withTimeout(
+          runPostLoginSetup(
+            browser,
+            {
+              avatarPath,
+              appsScriptPath,
+              appsScriptCode,
+              totpSecret: resolveTotpSecret(gmail) || profile.gmail?.totpSecret || undefined,
+              gmailEmail: gmail?.email || profile.gmail?.email || undefined,
+              formFillEnabled,
+              formTitle,
+              formDescription,
+              formHeaderPath: formHeaderPath || undefined,
+              formLinkStyle
+            },
+            (step) => {
+              emitLoginProgress(
+                `[${step.ok ? 'OK' : 'WARN'} ${step.step}] ${step.detail}`,
+                step.ok ? 'success' : 'warn'
+              )
+            }
+          ),
+          12 * 60 * 1000,
+          'Post-setup quá thời gian (12 phút) — login vẫn giữ'
         )
         postSetupNote = [postSetupNote, formatPostSetupSummary(steps)].filter(Boolean).join(' · ')
       } catch (error) {
@@ -2407,10 +2473,12 @@ export async function loginGmailForProfile(
     })
     emitLoginProgress(message, 'error')
     const skipped = error instanceof SkipLoginError || message.toLowerCase().includes('not a robot')
+    const errorText = skipped ? `[BỎ QUA] ${message}` : message
+    writeLoginNoteToProfile(profileId, errorText, gmail?.email)
     return {
       profileId,
       success: false,
-      error: skipped ? `[BỎ QUA] ${message}` : message
+      error: errorText
     }
   } finally {
     detachGuard?.()

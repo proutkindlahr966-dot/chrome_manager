@@ -20,6 +20,7 @@ export const IPC = {
   PROFILES_LOGIN_GMAIL_BULK: 'profiles:loginGmailBulk',
   PROFILES_TILE_LAYOUT: 'profiles:tileLayout',
   PROFILES_ARRANGE_WINDOWS: 'profiles:arrangeWindows',
+  PROFILES_MAXIMIZE_WINDOWS: 'profiles:maximizeWindows',
   PROFILE_STATUS_CHANGED: 'profiles:statusChanged',
   GMAIL_LOGIN_PROGRESS: 'gmail:loginProgress',
 

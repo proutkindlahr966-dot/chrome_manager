@@ -374,6 +374,50 @@ export async function arrangeProfileWindows(profileIds: string[]): Promise<void>
   )
 }
 
+/** Phóng to cửa sổ Chrome đã chạy xong (đợt luồng hoàn tất) */
+export async function maximizeProfileWindows(profileIds: string[]): Promise<void> {
+  const ids = profileIds.filter((id) => running.has(id))
+  if (!ids.length) return
+  await Promise.all(ids.map((id) => setWindowMaximized(id)))
+}
+
+async function setWindowMaximized(profileId: string): Promise<boolean> {
+  const port = getDebugPort(profileId)
+  if (!port) return false
+  try {
+    const puppeteer = (await import('puppeteer-core')).default
+    const browser = await puppeteer.connect({
+      browserURL: `http://127.0.0.1:${port}`,
+      defaultViewport: null
+    })
+    try {
+      const pages = await browser.pages()
+      const page = pages[0] || (await browser.newPage())
+      const session = await page.createCDPSession()
+      const { windowId } = (await session.send('Browser.getWindowForTarget')) as {
+        windowId: number
+      }
+      // CDP không cho maximized kèm left/top/size — về normal trước rồi maximize
+      await session
+        .send('Browser.setWindowBounds', {
+          windowId,
+          bounds: { windowState: 'normal' }
+        })
+        .catch(() => undefined)
+      await session.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { windowState: 'maximized' }
+      })
+      await session.detach().catch(() => undefined)
+      return true
+    } finally {
+      browser.disconnect()
+    }
+  } catch {
+    return false
+  }
+}
+
 export async function launchProfile(
   profileId: string,
   options?: LaunchOptions
@@ -395,6 +439,8 @@ async function launchProfileUnlocked(
     const entry = running.get(profileId)!
     if (options?.windowBounds) {
       void applyWindowBounds(profileId, options.windowBounds)
+    } else if (options?.startMaximized) {
+      void setWindowMaximized(profileId)
     }
     return { profileId, success: true, pid: entry.pid, debugPort: entry.debugPort }
   }
@@ -429,6 +475,8 @@ async function launchProfileUnlocked(
       const b = options.windowBounds
       args.push(`--window-position=${Math.round(b.left)},${Math.round(b.top)}`)
       args.push(`--window-size=${Math.round(b.width)},${Math.round(b.height)}`)
+    } else if (options?.startMaximized) {
+      args.push('--start-maximized')
     }
 
     const proxy = await resolveChromeProxyServer(profileId, profile.proxy)
@@ -462,6 +510,8 @@ async function launchProfileUnlocked(
 
     if (options?.windowBounds) {
       await applyWindowBounds(profileId, options.windowBounds)
+    } else if (options?.startMaximized) {
+      await setWindowMaximized(profileId)
     }
 
     const launched = db.setProfileStatus(profileId, 'running', new Date().toISOString())
@@ -583,25 +633,26 @@ export async function bulkLaunch(ids: string[]): Promise<BulkResult> {
   const settings = getDb().getSettings()
   const successIds: string[] = []
   const failed: Array<{ id: string; error: string }> = []
-  const tiles = computeTileLayout(ids.length)
-  const queue = ids.map((id, index) => ({ id, index }))
+  // Giữ thứ tự bảng (trên→dưới); mỗi cửa sổ phóng to toàn màn hình — không chia ô
+  const queue = [...ids]
   const workers = Math.max(1, settings.maxConcurrentLaunches)
 
   async function worker(): Promise<void> {
     while (queue.length) {
-      const item = queue.shift()
-      if (!item) break
-      const result = await launchProfile(item.id, { windowBounds: tiles[item.index] })
-      if (result.success) successIds.push(item.id)
-      else failed.push({ id: item.id, error: result.error ?? 'Lỗi' })
+      const id = queue.shift()
+      if (!id) break
+      const result = await launchProfile(id, { startMaximized: true })
+      if (result.success) successIds.push(id)
+      else failed.push({ id, error: result.error ?? 'Lỗi' })
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(workers, ids.length) }, () => worker()))
-  if (successIds.length > 1) {
-    await arrangeProfileWindows(successIds)
+  const orderedOpen = ids.filter((id) => successIds.includes(id))
+  if (orderedOpen.length) {
+    await maximizeProfileWindows(orderedOpen)
   }
-  return { successIds, failed }
+  return { successIds: orderedOpen, failed }
 }
 
 export async function bulkStop(ids: string[]): Promise<BulkResult> {

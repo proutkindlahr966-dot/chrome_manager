@@ -82,6 +82,8 @@ export function ProfileTable({
     additive: boolean
     base: Set<string>
     moved: boolean
+    /** Plain click lại dòng đang chọn → bỏ chọn khi mouseup (nếu không kéo) */
+    toggleOffId: string | null
   } | null>(null)
   const profilesRef = useRef(profiles)
   profilesRef.current = profiles
@@ -94,6 +96,12 @@ export function ProfileTable({
       document.body.classList.remove('select-none')
     }
     function onUp(): void {
+      const drag = dragRef.current
+      if (drag && !drag.moved && !drag.additive && drag.toggleOffId) {
+        const next = new Set(drag.base)
+        next.delete(drag.toggleOffId)
+        onSelectIdsRef.current([...next])
+      }
       endDrag()
     }
     window.addEventListener('mouseup', onUp)
@@ -139,18 +147,19 @@ export function ProfileTable({
     e.preventDefault()
     document.body.classList.add('select-none')
     const additive = e.ctrlKey || e.metaKey
+    const id = profiles[index]?.id
     dragRef.current = {
       startIndex: index,
       additive,
       base: new Set(selectedIds),
-      moved: false
+      moved: false,
+      toggleOffId: null
     }
     anchorIndexRef.current = index
 
     if (additive) {
       // Ctrl+click: chọn ↔ bỏ chọn dòng hiện tại; kéo thì cộng dải vào base
       const next = new Set(selectedIds)
-      const id = profiles[index]?.id
       if (id) {
         if (next.has(id)) next.delete(id)
         else next.add(id)
@@ -158,9 +167,12 @@ export function ProfileTable({
         dragRef.current.base = new Set(next)
         onSelectIds([...next])
       }
-    } else {
-      const id = profiles[index]?.id
-      if (id) onSelectIds([id])
+    } else if (id && selectedIds.has(id)) {
+      // Click lại dòng đang chọn → bỏ chọn khi nhả chuột (nếu không kéo)
+      dragRef.current.toggleOffId = id
+    } else if (id) {
+      // Click dòng chưa chọn → chọn dòng đó
+      onSelectIds([id])
     }
   }
 
@@ -231,7 +243,7 @@ export function ProfileTable({
                   data-profile-index={index}
                   className={cn(
                     'border-t border-line transition hover:bg-surface-muted/40',
-                    'cursor-default',
+                    'cursor-pointer',
                     selected && 'bg-accent-soft/50'
                   )}
                   onMouseDown={(e) => onRowMouseDown(e, index)}

@@ -237,6 +237,10 @@ export class Database {
 
   updateSettings(patch: Partial<AppSettings>): AppSettings {
     this.data.settings = { ...this.data.settings, ...patch }
+    if (patch.maxConcurrentLaunches != null) {
+      const n = Math.floor(Number(patch.maxConcurrentLaunches)) || 1
+      this.data.settings.maxConcurrentLaunches = Math.min(25, Math.max(1, n))
+    }
     this.ensureProfilesRoot()
     this.persist()
     return this.getSettings()
@@ -297,11 +301,13 @@ export class Database {
   }
 
   deleteGroup(id: string): void {
+    const toRemove = this.data.profiles.filter((p) => p.groupId === id)
     this.data.groups = this.data.groups.filter((g) => g.id !== id)
-    this.data.profiles = this.data.profiles.map((p) =>
-      p.groupId === id ? { ...p, groupId: null, updatedAt: new Date().toISOString() } : p
-    )
+    this.data.profiles = this.data.profiles.filter((p) => p.groupId !== id)
     this.persist()
+    for (const profile of toRemove) {
+      if (profile.dataDir) this.safeRemoveDataDir(profile.dataDir)
+    }
   }
 
   listProfiles(): ChromeProfile[] {

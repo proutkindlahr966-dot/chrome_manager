@@ -52,7 +52,7 @@ interface AppState {
     options?: GmailLoginOptions
   ) => Promise<GmailLoginResult | BulkResult>
 
-  createGroup: (input: CreateGroupInput) => Promise<void>
+  createGroup: (input: CreateGroupInput) => Promise<ProfileGroup>
   updateGroup: (id: string, input: UpdateGroupInput) => Promise<void>
   deleteGroup: (id: string) => Promise<void>
 
@@ -215,8 +215,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   createGroup: async (input) => {
-    await window.api.groups.create(input)
+    const group = await window.api.groups.create(input)
     await get().refreshAll()
+    return group
   },
 
   updateGroup: async (id, input) => {

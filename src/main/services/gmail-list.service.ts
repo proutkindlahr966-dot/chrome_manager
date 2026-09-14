@@ -93,7 +93,8 @@ export function loadGmailSetup(): GmailPostSetupConfig {
       formFillEnabled: Boolean(raw.formFillEnabled),
       formTitle: typeof raw.formTitle === 'string' ? raw.formTitle : '',
       formDescription: typeof raw.formDescription === 'string' ? raw.formDescription : '',
-      formHeaderPath: typeof raw.formHeaderPath === 'string' ? raw.formHeaderPath : ''
+      formHeaderPath: typeof raw.formHeaderPath === 'string' ? raw.formHeaderPath : '',
+      formLinkStyle: raw.formLinkStyle === 'long' ? 'long' : 'short'
     }
   } catch {
     return { ...DEFAULT_GMAIL_POST_SETUP }
@@ -116,7 +117,8 @@ export function saveGmailSetup(config: GmailPostSetupConfig): {
     formFillEnabled: Boolean(config.formFillEnabled),
     formTitle: config.formTitle ?? '',
     formDescription: config.formDescription ?? '',
-    formHeaderPath: (config.formHeaderPath ?? '').trim()
+    formHeaderPath: (config.formHeaderPath ?? '').trim(),
+    formLinkStyle: config.formLinkStyle === 'long' ? 'long' : 'short'
   }
   writeFileSync(filePath, JSON.stringify(normalized, null, 2), 'utf-8')
   return { path: filePath, config: normalized }
