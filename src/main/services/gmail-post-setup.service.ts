@@ -1,4 +1,4 @@
-import { clipboard } from 'electron'
+﻿import { clipboard } from 'electron'
 import { existsSync, readFileSync } from 'fs'
 import { basename, isAbsolute, resolve } from 'path'
 import type { Browser, ElementHandle, Frame, Page, Target } from 'puppeteer-core'
@@ -12,6 +12,11 @@ const FORM_CREATE_URL =
   'https://docs.google.com/forms/u/0/create?usp=forms_home&ths=true'
 /** Clipboard OS dùng chung — serialize khi nhiều Chrome paste song song */
 const withClipboard = createAsyncLock()
+/**
+ * Popover "Copy responder link" đóng ngay khi cửa sổ mất focus.
+ * 5 Chrome chia ô: chỉ 1 luồng được mở panel / tick Shorten / đọc URL tại một thời điểm.
+ */
+const withFormLinkUi = createAsyncLock()
 
 export interface PostSetupStepResult {
   step: 'avatar' | 'sheet' | 'form' | 'script' | '2fa-live'
@@ -227,7 +232,7 @@ type ResponderPanelSnap = {
   copyY: number
 }
 
-/** Đọc popover "Copy responder link" — URL có thể là chữ, không phải input */
+/** Đọc popover "Copy responder link" — phải có nút Copy hoặc URL, không lấy nhãn "Shorten URL" đơn lẻ. */
 async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | null> {
   for (const frame of framesOf(page)) {
     let snap: ResponderPanelSnap | null = null
@@ -244,12 +249,93 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
             .replace(/\s+/g, ' ')
             .trim()
             .toLowerCase()
-
         const hint = (t: string): boolean =>
           t.includes('copy responder link') ||
           t.includes('sao chép liên kết người trả lời') ||
           t.includes('shorten url') ||
           t.includes('rút gọn url')
+        const findCopyBtn = (root: HTMLElement): HTMLElement | null => {
+          const buttons = Array.from(
+            root.querySelectorAll('button, div[role="button"], span[role="button"]')
+          ) as HTMLElement[]
+          return (
+            buttons.find((el) => {
+              const lab = labelOf(el)
+              if (lab !== 'copy' && lab !== 'sao chép' && lab !== 'copy link') return false
+              const r = el.getBoundingClientRect()
+              return r.width > 4 && r.height > 4
+            }) || null
+          )
+        }
+        const collectUrls = (root: HTMLElement): string[] => {
+          const urls: string[] = []
+          const push = (raw: string): void => {
+            let t = (raw || '').trim().split(/\s+/)[0].replace(/[.,;)]+$/, '')
+            if (!t) return
+            if (/^forms\.gle\//i.test(t)) t = `https://${t}`
+            if (/^docs\.google\.com\/forms\//i.test(t)) t = `https://${t}`
+            if (/^https?:\/\/forms\.gle\/[A-Za-z0-9_-]+\/?$/i.test(t)) urls.push(t)
+            else if (
+              /docs\.google\.com\/forms\//i.test(t) &&
+              /viewform|formResponse|\/e\//i.test(t)
+            ) {
+              urls.push(t)
+            }
+          }
+          const blob = `${root.innerText || ''} ${root.textContent || ''}`
+          const fromText =
+            blob.match(
+              /(?:https?:\/\/)?(?:forms\.gle\/[A-Za-z0-9_-]+|docs\.google\.com\/forms\/[^\s"'<>]+)/gi
+            ) || []
+          for (const u of fromText) push(u)
+          for (const el of Array.from(
+            root.querySelectorAll('input, textarea, a[href], [data-value]')
+          ) as HTMLElement[]) {
+            if (el instanceof HTMLAnchorElement && el.href) push(el.href)
+            if ('value' in el) push(String((el as HTMLInputElement).value || ''))
+            const dv = el.getAttribute('data-value')
+            if (dv) push(dv)
+          }
+          return urls
+        }
+        const isRealPanel = (el: HTMLElement): boolean => {
+          if (!isVisible(el)) return false
+          const t = (el.innerText || '').toLowerCase()
+          const isPublishedOptions =
+            t.includes('published options') ||
+            (t.includes('accepting responses') && t.includes('responders'))
+          // Dialog Published options dài hơn popover nhỏ — nới giới hạn chữ
+          if (!hint(t) || t.length < 8 || t.length > (isPublishedOptions ? 6000 : 1600)) {
+            return false
+          }
+          return Boolean(findCopyBtn(el) || collectUrls(el).length)
+        }
+
+        // Published options: lăn xuống trước để Shorten URL / Copy được render
+        const allDialogs = Array.from(
+          document.querySelectorAll('[role="dialog"], [aria-modal="true"], [role="menu"]')
+        ) as HTMLElement[]
+        for (const d of allDialogs) {
+          const t = (d.innerText || '').toLowerCase()
+          if (
+            !t.includes('published options') &&
+            !(t.includes('accepting responses') && t.includes('responders')) &&
+            !t.includes('shorten url') &&
+            !t.includes('copy responder')
+          ) {
+            continue
+          }
+          const boxes = [d, ...(Array.from(d.querySelectorAll('*')) as HTMLElement[])]
+          for (const el of boxes) {
+            const st = window.getComputedStyle(el)
+            if (
+              /(auto|scroll|overlay)/.test(st.overflowY) &&
+              el.scrollHeight > el.clientHeight + 8
+            ) {
+              el.scrollTop = el.scrollHeight
+            }
+          }
+        }
 
         const roots = Array.from(
           document.querySelectorAll(
@@ -257,8 +343,6 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
           )
         ) as HTMLElement[]
 
-        // Không quét mọi div (Form editor có hàng nghìn node — đơ khi chạy nhiều luồng).
-        // Đi từ nhãn "Shorten URL" / "Copy responder link" rồi leo lên container nhỏ.
         const seeds = Array.from(
           document.querySelectorAll(
             'span, label, button, h1, h2, [role="heading"], [role="checkbox"]'
@@ -274,20 +358,13 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
             t !== 'shorten url' &&
             t !== 'rút gọn url' &&
             t !== 'copy responder link' &&
-            t !== 'sao chép liên kết người trả lời' &&
-            t !== 'copy'
+            t !== 'sao chép liên kết người trả lời'
           ) {
             continue
           }
           let p: HTMLElement | null = el
-          for (let i = 0; i < 10 && p; i++) {
-            const pt = (p.innerText || '').toLowerCase()
-            if (
-              pt.length > 0 &&
-              pt.length < 900 &&
-              (pt.includes('shorten url') || pt.includes('rút gọn url')) &&
-              (pt.includes('copy') || pt.includes('sao chép') || /forms\.gle|docs\.google\.com\/forms/.test(pt))
-            ) {
+          for (let i = 0; i < 14 && p; i++) {
+            if (isRealPanel(p)) {
               roots.push(p)
               break
             }
@@ -296,7 +373,7 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
         }
 
         const ranked = [...new Set(roots)]
-          .filter((el) => hint((el.innerText || '').toLowerCase()) && isVisible(el))
+          .filter(isRealPanel)
           .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)
         const panel = ranked[0]
         if (!panel) return null
@@ -306,29 +383,7 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
           // ignore
         }
 
-        const panelText = panel.innerText || ''
-        const urls: string[] = []
-        const push = (raw: string): void => {
-          const t = (raw || '').trim().split(/\s+/)[0].replace(/[.,;)]+$/, '')
-          if (/^https?:\/\/forms\.gle\/[A-Za-z0-9_-]+\/?$/i.test(t)) urls.push(t)
-          else if (
-            /docs\.google\.com\/forms\//i.test(t) &&
-            /viewform|formResponse|\/e\//i.test(t)
-          ) {
-            urls.push(t)
-          }
-        }
-        const fromText =
-          panelText.match(
-            /https?:\/\/(?:forms\.gle\/[A-Za-z0-9_-]+|docs\.google\.com\/forms\/[^\s]+)/gi
-          ) || []
-        for (const u of fromText) push(u)
-        for (const el of Array.from(
-          panel.querySelectorAll('input, textarea, a[href]')
-        ) as Array<HTMLInputElement | HTMLTextAreaElement | HTMLAnchorElement>) {
-          if ('href' in el && el.href) push(el.href)
-          if ('value' in el) push(String(el.value || ''))
-        }
+        const urls = collectUrls(panel)
         const short = urls.find((u) => /forms\.gle\//i.test(u))
         const url = short || urls[0] || ''
 
@@ -347,7 +402,8 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
             (el.parentElement as HTMLElement | null) ||
             el
           const input = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null
-          const roleBox = (row.querySelector('[role="checkbox"]') as HTMLElement | null) ||
+          const roleBox =
+            (row.querySelector('[role="checkbox"]') as HTMLElement | null) ||
             (el.getAttribute('role') === 'checkbox' ? el : null)
           if (roleBox?.getAttribute('aria-checked') === 'true' || input?.checked) {
             shortenChecked = true
@@ -360,6 +416,11 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
             (row.querySelector(
               'div.VfPpkd-MPu53c, [role="checkbox"], input[type="checkbox"]'
             ) as HTMLElement | null) || el
+          try {
+            box.scrollIntoView({ block: 'center', inline: 'nearest' })
+          } catch {
+            // ignore
+          }
           const r = box.getBoundingClientRect()
           if (r.width > 0 && r.height > 0) {
             shortenX = r.left + Math.min(10, r.width / 2)
@@ -370,14 +431,7 @@ async function readResponderPanelSnap(page: Page): Promise<ResponderPanelSnap | 
 
         let copyX = 0
         let copyY = 0
-        const buttons = Array.from(
-          panel.querySelectorAll('button, div[role="button"], span[role="button"]')
-        ) as HTMLElement[]
-        const copyBtn = buttons.find((el) => {
-          if (!isVisible(el)) return false
-          const lab = labelOf(el)
-          return lab === 'copy' || lab === 'sao chép' || lab === 'copy link'
-        })
+        const copyBtn = findCopyBtn(panel)
         if (copyBtn) {
           try {
             copyBtn.scrollIntoView({ block: 'center', inline: 'nearest' })
@@ -494,26 +548,492 @@ async function hasCopyResponderLinkDialog(page: Page): Promise<boolean> {
   return Boolean(snap?.open)
 }
 
+/**
+ * Chỉ đóng tip "Got it" (vd. "Simple response management").
+ * KHÔNG đóng "Published options … Cancel | Save" — dialog đó chính là chỗ chứa
+ * phần "Copy responder link" / Shorten URL ở phía dưới (cửa sổ chia ô phải lăn).
+ */
+async function clearPublishBlockers(page: Page): Promise<string[]> {
+  const cleared: string[] = []
+  for (const frame of framesOf(page)) {
+    const hit = await frame
+      .evaluate(() => {
+        const norm = (s: string | null): string =>
+          (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 8 && r.height > 8
+        }
+        const fire = (el: HTMLElement): void => {
+          el.dispatchEvent(
+            new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 })
+          )
+          el.dispatchEvent(
+            new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 })
+          )
+          el.click()
+        }
+
+        const dialogs = (
+          Array.from(
+            document.querySelectorAll('[role="dialog"], [aria-modal="true"], [role="alertdialog"]')
+          ) as HTMLElement[]
+        ).filter(vis)
+
+        for (const d of dialogs) {
+          const text = norm(d.innerText)
+          // Giữ panel Copy / Published options (có Copy ở dưới khi lăn)
+          if (
+            text.includes('shorten url') ||
+            text.includes('copy responder link') ||
+            text.includes('published options') ||
+            text.includes('accepting responses')
+          ) {
+            continue
+          }
+
+          const btns = (
+            Array.from(
+              d.querySelectorAll('button, div[role="button"], span[role="button"]')
+            ) as HTMLElement[]
+          ).filter(vis)
+          const gotIt = btns.find((b) =>
+            ['got it', 'đã hiểu', 'được rồi'].includes(
+              norm(b.innerText || b.getAttribute('aria-label'))
+            )
+          )
+          if (gotIt) {
+            fire(gotIt)
+            return 'tip Got it'
+          }
+        }
+        return ''
+      })
+      .catch(() => '')
+    if (!hit) continue
+    cleared.push(hit)
+    await delay(450)
+  }
+  return cleared
+}
+
+/** Dialog Published options đang mở (chứa Copy khi lăn xuống). */
+async function hasPublishedOptionsDialog(page: Page): Promise<boolean> {
+  for (const frame of framesOf(page)) {
+    const ok = await frame
+      .evaluate(() => {
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 40 && r.height > 40
+        }
+        return (
+          Array.from(
+            document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+          ) as HTMLElement[]
+        ).some((d) => {
+          if (!vis(d)) return false
+          const t = (d.innerText || '').toLowerCase()
+          return (
+            t.includes('published options') ||
+            (t.includes('accepting responses') && t.includes('responders'))
+          )
+        })
+      })
+      .catch(() => false)
+    if (ok) return true
+  }
+  return false
+}
+
+/**
+ * Published options mở nhưng sau khi lăn vẫn không có Shorten/Copy → Cancel để
+ * thoát, rồi mở đúng mục "Copy responder link" từ chip.
+ */
+async function dismissPublishedOptionsWithoutCopy(page: Page): Promise<boolean> {
+  await revealResponderCopySection(page)
+  if (await hasCopyResponderLinkDialog(page)) return false
+  if (!(await hasPublishedOptionsDialog(page))) return false
+
+  for (const frame of framesOf(page)) {
+    const closed = await frame
+      .evaluate(() => {
+        const norm = (s: string | null): string =>
+          (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 8 && r.height > 8
+        }
+        const dialogs = (
+          Array.from(
+            document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+          ) as HTMLElement[]
+        ).filter(vis)
+        for (const d of dialogs) {
+          const t = norm(d.innerText)
+          if (
+            !t.includes('published options') &&
+            !(t.includes('accepting responses') && t.includes('responders'))
+          ) {
+            continue
+          }
+          // Đã có Copy/Shorten trong dialog → giữ lại
+          if (t.includes('shorten url') || t.includes('copy responder link')) return false
+          const btns = (
+            Array.from(
+              d.querySelectorAll('button, div[role="button"], span[role="button"]')
+            ) as HTMLElement[]
+          ).filter(vis)
+          const cancel = btns.find((b) =>
+            ['cancel', 'huỷ', 'hủy'].includes(norm(b.innerText || b.getAttribute('aria-label')))
+          )
+          if (cancel) {
+            cancel.click()
+            return true
+          }
+        }
+        return false
+      })
+      .catch(() => false)
+    if (closed) {
+      await delay(450)
+      return true
+    }
+  }
+  await page.keyboard.press('Escape').catch(() => undefined)
+  await delay(350)
+  return true
+}
+
+/**
+ * Dialog "Published options" cao hơn cửa sổ chia ô → phần "Copy responder link"
+ * nằm dưới đáy. Lăn trong dialog để nút Copy / hàng Shorten URL vào viewport
+ * (click chuột thật mới ghi được clipboard).
+ */
+async function revealResponderCopySection(page: Page): Promise<boolean> {
+  await installViewportHelpers(page)
+  for (const frame of framesOf(page)) {
+    const ok = await frame
+      .evaluate(() => {
+        const norm = (s: string | null): string =>
+          (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 0 && r.height > 0
+        }
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') {
+            w.__cmReveal(el)
+            return
+          }
+          try {
+            el.scrollIntoView({ block: 'center', inline: 'nearest' })
+          } catch {
+            // ignore
+          }
+        }
+        const scrollDeep = (root: HTMLElement): void => {
+          const boxes = [root, ...(Array.from(root.querySelectorAll('*')) as HTMLElement[])]
+          for (const el of boxes) {
+            const st = window.getComputedStyle(el)
+            if (
+              /(auto|scroll|overlay)/.test(st.overflowY) &&
+              el.scrollHeight > el.clientHeight + 8
+            ) {
+              el.scrollTop = el.scrollHeight
+            }
+          }
+        }
+
+        const dialogs = (
+          Array.from(
+            document.querySelectorAll('[role="dialog"], [aria-modal="true"], [role="menu"]')
+          ) as HTMLElement[]
+        ).filter(
+          (d) =>
+            vis(d) &&
+            /responder|người trả lời|shorten url|rút gọn|published|đã xuất bản|accepting responses/i.test(
+              d.innerText || ''
+            )
+        )
+        if (!dialogs.length) return false
+
+        // Lăn hết khung cuộn trong dialog — phần Copy nằm dưới "Responders"
+        for (const d of dialogs) scrollDeep(d)
+
+        const copyLabels = ['copy', 'sao chép', 'copy link']
+        const shortenLabels = ['shorten url', 'rút gọn url']
+        const linkLabels = ['copy responder link', 'sao chép liên kết người trả lời']
+        let target: HTMLElement | null = null
+        for (const d of dialogs) {
+          const nodes = Array.from(
+            d.querySelectorAll('button, div[role="button"], span[role="button"], span, label, div')
+          ) as HTMLElement[]
+          target =
+            nodes.find((el) => {
+              const t = norm(el.innerText || el.getAttribute('aria-label'))
+              return (
+                vis(el) &&
+                (copyLabels.includes(t) || shortenLabels.includes(t) || linkLabels.includes(t))
+              )
+            }) || null
+          if (target) break
+        }
+        if (!target) {
+          // Chưa thấy Copy: lăn thêm một nhịp (lazy render) rồi tìm lại
+          for (const d of dialogs) {
+            scrollDeep(d)
+            d.scrollTop = d.scrollHeight
+          }
+          for (const d of dialogs) {
+            const nodes = Array.from(
+              d.querySelectorAll('button, div[role="button"], span, label')
+            ) as HTMLElement[]
+            target =
+              nodes.find((el) => {
+                const t = norm(el.innerText || el.getAttribute('aria-label'))
+                return vis(el) && (copyLabels.includes(t) || shortenLabels.includes(t))
+              }) || null
+            if (target) break
+          }
+        }
+        if (!target) return false
+
+        reveal(target)
+        const r = target.getBoundingClientRect()
+        return r.width > 4 && r.height > 4 && r.top < window.innerHeight && r.bottom > 0
+      })
+      .catch(() => false)
+    if (ok) return true
+  }
+  return false
+}
+
+/** Dialog/popover đang mở + các nút liên quan — chỉ dùng để ghi log khi không thấy panel. */
+async function dumpFormDialogs(page: Page): Promise<string> {
+  const out: string[] = []
+  for (const frame of framesOf(page)) {
+    const line = await frame
+      .evaluate(() => {
+        const short = (t: string, n: number): string => t.replace(/\s+/g, ' ').trim().slice(0, n)
+        const vis = (el: HTMLElement): boolean => {
+          const r = el.getBoundingClientRect()
+          if (r.width < 8 || r.height < 8) return false
+          const s = window.getComputedStyle(el)
+          return s.display !== 'none' && s.visibility !== 'hidden'
+        }
+        const dialogs = (
+          Array.from(
+            document.querySelectorAll(
+              '[role="dialog"], [aria-modal="true"], [role="alertdialog"], [role="menu"]'
+            )
+          ) as HTMLElement[]
+        )
+          .filter(vis)
+          .map((el) => `dlg{${short(el.innerText || '', 260)}}`)
+        const btns = [
+          ...new Set(
+            (Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[])
+              .filter(vis)
+              .map((el) => {
+                const t = short(el.innerText || el.getAttribute('aria-label') || '', 22)
+                if (
+                  !/publish|xuất bản|copy|sao chép|shorten|rút gọn|responder|người trả lời/i.test(t)
+                ) {
+                  return ''
+                }
+                const r = el.getBoundingClientRect()
+                const out = r.bottom > window.innerHeight || r.top < 0 ? '|ngoài' : ''
+                return `${t}@${Math.round(r.left)},${Math.round(r.top)}${out}`
+              })
+              .filter(Boolean)
+          )
+        ]
+        if (!dialogs.length && !btns.length) return ''
+        return [
+          `vp=${window.innerWidth}x${window.innerHeight}`,
+          ...dialogs,
+          btns.length ? `nút[${btns.join(',')}]` : ''
+        ]
+          .filter(Boolean)
+          .join(' ')
+      })
+      .catch(() => '')
+    if (line) out.push(line)
+  }
+  return out.join(' | ').slice(0, 700)
+}
+
 /** Mở popover Copy responder link bằng chip Published trên toolbar (ảnh 3). */
+/**
+ * Chip Published ở một số tài khoản mở MENU ("Copy responder link" / "Published
+ * options" / "Unpublish") chứ không mở popover — phải bấm đúng mục menu.
+ */
+async function clickCopyResponderMenuItem(page: Page): Promise<boolean> {
+  await installViewportHelpers(page)
+  for (const frame of framesOf(page)) {
+    const point = await frame
+      .evaluate(() => {
+        const norm = (s: string | null): string =>
+          (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 8 && r.height > 8
+        }
+        const items = Array.from(
+          document.querySelectorAll(
+            '[role="menuitem"], [role="option"], li, div[role="button"], span[role="button"], button'
+          )
+        ) as HTMLElement[]
+        const hit = items.find((el) => {
+          if (!vis(el)) return false
+          const t = norm(el.innerText || el.getAttribute('aria-label'))
+          if (t !== 'copy responder link' && t !== 'sao chép liên kết người trả lời') return false
+          // Trong popover Copy đã có ô URL + nút Copy → đây là tiêu đề, không phải mục menu
+          const panel = el.closest('[role="dialog"], [role="menu"], [aria-modal="true"]')
+          const ptext = norm((panel as HTMLElement | null)?.innerText || '')
+          return !ptext.includes('shorten url') && !ptext.includes('rút gọn url')
+        })
+        if (!hit) return null
+        const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+        if (typeof w.__cmReveal === 'function') w.__cmReveal(hit)
+        const r = hit.getBoundingClientRect()
+        if (r.width < 8 || r.height < 8) return null
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+      })
+      .catch(() => null)
+    if (!point) continue
+    const abs = await framePointToPage(page, frame, point)
+    if (await mouseClickPoint(page, abs)) return true
+  }
+  return false
+}
+
 async function openCopyResponderPanel(page: Page): Promise<boolean> {
+  await revealResponderCopySection(page)
   if (await hasCopyResponderLinkDialog(page)) return true
 
-  const toolbar = await locateToolbarPublish(page)
-  if (toolbar?.kind === 'published') {
-    await mouseClickPoint(page, toolbar)
-    await delay(700)
-    if (await hasCopyResponderLinkDialog(page)) return true
-    await clickToolbarPublishDom(page)
-    await delay(500)
+  // Dialog Published options đã mở sau Publish — thử lăn xuống phần Copy trước
+  if (await hasPublishedOptionsDialog(page)) {
+    for (let i = 0; i < 3; i++) {
+      await revealResponderCopySection(page)
+      await delay(350)
+      if (await hasCopyResponderLinkDialog(page)) return true
+    }
+    // Không có Shorten/Copy trong dialog này → Cancel rồi mở đúng popover
+    await dismissPublishedOptionsWithoutCopy(page)
   }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await clearPublishBlockers(page)
+
+    if (await hasPublishedOptionsDialog(page)) {
+      await revealResponderCopySection(page)
+      if (await hasCopyResponderLinkDialog(page)) return true
+      await dismissPublishedOptionsWithoutCopy(page)
+    }
+
+    // Ưu tiên mục/menu "Copy responder link" trước khi bấm chip (chip dễ mở Published options)
+    if (await clickCopyResponderMenuItem(page)) {
+      await delay(700)
+      await revealResponderCopySection(page)
+      if (await hasCopyResponderLinkDialog(page)) return true
+    }
+
+    const toolbar = await locateToolbarPublish(page)
+    if (toolbar?.kind === 'published') {
+      await mouseClickPoint(page, toolbar)
+      await delay(800)
+      // Chip mở menu → bấm đúng "Copy responder link", không để kẹt ở Published options
+      if (await clickCopyResponderMenuItem(page)) await delay(700)
+      await revealResponderCopySection(page)
+      if (await hasCopyResponderLinkDialog(page)) return true
+      if (await hasPublishedOptionsDialog(page)) {
+        await dismissPublishedOptionsWithoutCopy(page)
+        if (await clickCopyResponderMenuItem(page)) {
+          await delay(700)
+          await revealResponderCopySection(page)
+          if (await hasCopyResponderLinkDialog(page)) return true
+        }
+      }
+    }
+    await clickToolbarPublishDom(page)
+    await delay(700)
+    if (await clickCopyResponderMenuItem(page)) await delay(700)
+    await revealResponderCopySection(page)
+    if (await hasCopyResponderLinkDialog(page)) return true
+  }
+  await revealResponderCopySection(page)
   return hasCopyResponderLinkDialog(page)
 }
 
+/** Focus nút Copy rồi Enter — phím của Puppeteer là gesture thật nên clipboard ghi được. */
+async function pressCopyInResponderPanel(page: Page): Promise<boolean> {
+  for (const frame of framesOf(page)) {
+    const focused = await frame
+      .evaluate(() => {
+        const labelOf = (el: HTMLElement): string =>
+          (el.innerText || el.getAttribute('aria-label') || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase()
+        const inResponderPanel = (el: HTMLElement): boolean => {
+          let p: HTMLElement | null = el
+          for (let i = 0; i < 12 && p; i++) {
+            const t = (p.innerText || '').toLowerCase()
+            if (
+              (t.includes('shorten url') || t.includes('rút gọn url')) &&
+              (t.includes('copy') || t.includes('sao chép'))
+            ) {
+              return true
+            }
+            p = p.parentElement
+          }
+          return false
+        }
+        const btn = (
+          Array.from(
+            document.querySelectorAll('button, div[role="button"], span[role="button"]')
+          ) as HTMLElement[]
+        ).find((el) => {
+          const r = el.getBoundingClientRect()
+          if (r.width < 8 || r.height < 8) return false
+          const lab = labelOf(el)
+          if (lab !== 'copy' && lab !== 'sao chép' && lab !== 'copy link') return false
+          return inResponderPanel(el)
+        })
+        if (!btn) return false
+        const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+        if (typeof w.__cmReveal === 'function') w.__cmReveal(btn)
+        btn.focus()
+        return document.activeElement === btn
+      })
+      .catch(() => false)
+    if (!focused) continue
+    await page.keyboard.press('Enter').catch(() => undefined)
+    return true
+  }
+  return false
+}
+
 async function clickCopyInResponderPanel(page: Page): Promise<boolean> {
+  // Nút Copy nằm dưới đáy dialog khi cửa sổ nhỏ → lăn vào viewport rồi đo lại
+  await revealResponderCopySection(page)
   const snap = await readResponderPanelSnap(page)
   if (snap && snap.copyX > 0 && snap.copyY > 0) {
     if (await mouseClickPoint(page, { x: snap.copyX, y: snap.copyY })) return true
   }
+  if (await pressCopyInResponderPanel(page)) return true
 
   for (const frame of framesOf(page)) {
     const clicked = await frame
@@ -571,6 +1091,8 @@ async function clickCopyInResponderPanel(page: Page): Promise<boolean> {
 /** Bấm Copy trên popover rồi đọc clipboard — không lấy URL từ chữ trên panel. */
 async function copyFormLinkViaCopyButton(page: Page): Promise<string> {
   return withClipboard(async () => {
+    // Chrome chỉ ghi clipboard khi cửa sổ đang focus — nhiều luồng phải kéo lên trước
+    await page.bringToFront().catch(() => undefined)
     const sentinel = `__cm_form_copy_${Date.now()}__`
     try {
       clipboard.writeText(sentinel)
@@ -601,33 +1123,85 @@ async function copyFormLinkViaCopyButton(page: Page): Promise<string> {
 }
 
 /**
- * Bước 3 — popover "Copy responder link":
- * long → Copy
- * short → tick Shorten URL, chờ forms.gle sẵn sàng, rồi Copy
+ * Bước 3 — popover "Copy responder link" (gọi khi đã giữ withFormLinkUi).
+ * long → Copy · short → tick Shorten URL, chờ forms.gle, rồi Copy
  */
-async function extractLinkFromCopyResponderDialog(
+async function extractLinkFromCopyResponderDialogUnlocked(
   page: Page,
-  linkStyle: FormLinkStyle
+  linkStyle: FormLinkStyle,
+  diag: string[]
 ): Promise<{ link: string; note: string } | null> {
-  const opened = await openCopyResponderPanel(page)
-  if (!opened) return null
+  // Cửa sổ khác vừa steal focus → popover cũ đã đóng. Mở lại khi tới lượt mình.
+  await page.bringToFront().catch(() => undefined)
+  await delay(250)
+
+  let opened = await openCopyResponderPanel(page)
+  if (!opened) {
+    await delay(700)
+    await clickToolbarPublishDom(page)
+    await delay(600)
+    opened = await openCopyResponderPanel(page)
+  }
+  if (!opened) {
+    diag.push(`panel Copy không mở · ${await dumpFormDialogs(page)}`)
+    return null
+  }
+  diag.push('panel Copy mở')
 
   const wantShort = linkStyle === 'short'
+  await revealResponderCopySection(page)
   await setShortenUrlCheckbox(page, wantShort)
 
   if (wantShort) {
     const waitStarted = Date.now()
-    while (Date.now() - waitStarted < 12000) {
+    while (Date.now() - waitStarted < 16000) {
+      // Luồng khác steal focus có thể ẩn phần Copy — giữ Published options, chỉ lăn lại
+      if (!(await hasCopyResponderLinkDialog(page))) {
+        await page.bringToFront().catch(() => undefined)
+        if (await hasPublishedOptionsDialog(page)) {
+          await revealResponderCopySection(page)
+          if (!(await hasCopyResponderLinkDialog(page))) {
+            await dismissPublishedOptionsWithoutCopy(page)
+            await openCopyResponderPanel(page)
+          }
+        } else {
+          await openCopyResponderPanel(page)
+        }
+        await setShortenUrlCheckbox(page, true)
+      }
+      await revealResponderCopySection(page)
       const snap = await readResponderPanelSnap(page)
       if (snap?.url && isShortFormUrl(snap.url)) break
       if (snap && snap.shortenChecked === false) {
         await setShortenUrlCheckbox(page, true)
       }
+      // URL chưa hiện trên panel — vẫn có thể Copy sau khi Shorten đã tick
+      if (snap && snap.shortenChecked === true && snap.copyX > 0) break
       await delay(400)
     }
   } else {
     await delay(300)
   }
+
+  const panelLink = async (): Promise<{ link: string; note: string } | null> => {
+    const snap = await readResponderPanelSnap(page)
+    if (!snap?.url) return null
+    const url = cleanFormUrl(snap.url)
+    if (matchesFormLinkStyle(url, linkStyle)) {
+      return {
+        link: url,
+        note: wantShort ? 'panel · forms.gle' : 'panel · viewform'
+      }
+    }
+    if (looksLikeFormResponderUrl(url)) {
+      return { link: url, note: 'panel URL' }
+    }
+    return null
+  }
+
+  // Nhiều Chrome song song tranh clipboard OS — ưu tiên URL đang hiện trên panel
+  const fromPanel = await panelLink()
+  if (fromPanel && matchesFormLinkStyle(fromPanel.link, linkStyle)) return fromPanel
 
   for (let attempt = 0; attempt < 5; attempt++) {
     const fromClip = await copyFormLinkViaCopyButton(page)
@@ -647,8 +1221,20 @@ async function extractLinkFromCopyResponderDialog(
         return { link: resolved, note: 'Copy · forms.gle → resolve long' }
       }
     }
+    const again = await panelLink()
+    if (again && matchesFormLinkStyle(again.link, linkStyle)) return again
     await delay(600)
   }
+
+  const lastPanel = await panelLink()
+  if (lastPanel) return lastPanel
+  const snap = await readResponderPanelSnap(page)
+  diag.push(
+    snap
+      ? `panel: shorten=${snap.shortenChecked === null ? '?' : String(snap.shortenChecked)}` +
+          ` url=${snap.url || 'trống'} copyBtn=${snap.copyX > 0 ? `${Math.round(snap.copyX)},${Math.round(snap.copyY)}` : 'không'}`
+      : `panel mất giữa chừng · ${await dumpFormDialogs(page)}`
+  )
   return null
 }
 
@@ -841,7 +1427,7 @@ async function locateToolbarPublish(
           const band =
             typeof (window as Window & { __cmToolbarBand?: () => number }).__cmToolbarBand ===
             'function'
-              ? (window as Window & { __cmToolbarBand: () => number }).__cmToolbarBand()
+              ? ((window as Window & { __cmToolbarBand?: () => number }).__cmToolbarBand as () => number)()
               : Math.max(180, Math.floor(window.innerHeight * 0.42))
           if (r.top > band) continue
           hits.push({
@@ -1056,49 +1642,111 @@ async function clickPublishFormConfirmDom(page: Page): Promise<boolean> {
  * Bước 2: bấm Publish trong dialog "Publish form"
  * Sau đó chờ popover Copy responder link (bước 3).
  */
-async function publishFormViaToolbarDialog(page: Page): Promise<'ok' | 'skip'> {
+async function publishFormViaToolbarDialog(page: Page, diag: string[]): Promise<'ok' | 'skip'> {
   await installViewportHelpers(page)
   await dismissFormThemePanel(page)
 
-  if (await hasCopyResponderLinkDialog(page)) return 'ok'
-
-  const toolbar = await locateToolbarPublish(page)
-
-  // Form đã Published: bấm chip trên toolbar để mở Copy responder link
-  if (toolbar?.kind === 'published') {
-    await mouseClickPoint(page, toolbar)
-    await delay(600)
-    if (!(await hasCopyResponderLinkDialog(page))) {
-      await clickToolbarPublishDom(page)
-      await delay(500)
-    }
-    const alreadyWait = Date.now()
-    while (Date.now() - alreadyWait < 8000) {
-      if (await hasCopyResponderLinkDialog(page)) return 'ok'
-      await delay(250)
-    }
-    return (await hasCopyResponderLinkDialog(page)) ? 'ok' : 'skip'
+  if (await hasCopyResponderLinkDialog(page)) {
+    diag.push('panel có sẵn')
+    return 'ok'
   }
 
-  // Bước 1: Publish trên toolbar (trừ khi dialog bước 2 đã mở)
-  if (!(await locatePublishFormConfirm(page))) {
+  // Tip onboarding / dialog cài đặt đang phủ toolbar → chip Publish bấm không ăn
+  const cleared = await clearPublishBlockers(page)
+  if (cleared.length) diag.push(`dọn: ${cleared.join(', ')}`)
+
+  const toolbar = await locateToolbarPublish(page)
+  diag.push(`toolbar=${toolbar ? toolbar.kind : 'không thấy'}`)
+
+  // Form đã Published: ưu tiên lăn trong Published options nếu đã mở; chỉ bấm chip khi chưa có
+  if (toolbar?.kind === 'published') {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) {
+        await page.bringToFront().catch(() => undefined)
+        const again = await clearPublishBlockers(page)
+        if (again.length) diag.push(`dọn: ${again.join(', ')}`)
+      }
+
+      if (await hasPublishedOptionsDialog(page)) {
+        await revealResponderCopySection(page)
+        if (await hasCopyResponderLinkDialog(page)) return 'ok'
+        // Dialog cài đặt không có Copy → đóng rồi mở đúng mục menu
+        await dismissPublishedOptionsWithoutCopy(page)
+      }
+
+      // Nút/mục "Copy responder link" nếu có sẵn — bấm chip lại dễ mở lại đầu dialog
+      if (await clickCopyResponderMenuItem(page)) {
+        diag.push('nút Copy responder link')
+        await delay(700)
+        await revealResponderCopySection(page)
+        if (await hasCopyResponderLinkDialog(page)) return 'ok'
+      }
+
+      // Chỉ bấm chip khi chưa có Published options
+      if (!(await hasPublishedOptionsDialog(page))) {
+        const chip = (await locateToolbarPublish(page)) || toolbar
+        await mouseClickPoint(page, chip)
+        await delay(700)
+        if (await clickCopyResponderMenuItem(page)) {
+          diag.push('menu Copy responder link')
+          await delay(700)
+        }
+      }
+      await revealResponderCopySection(page)
+      if (await hasCopyResponderLinkDialog(page)) return 'ok'
+      if (await hasPublishedOptionsDialog(page)) {
+        await dismissPublishedOptionsWithoutCopy(page)
+      }
+
+      if (!(await hasPublishedOptionsDialog(page))) {
+        await clickToolbarPublishDom(page)
+        await delay(600)
+        if (await clickCopyResponderMenuItem(page)) await delay(700)
+      }
+      await revealResponderCopySection(page)
+      if (await hasCopyResponderLinkDialog(page)) return 'ok'
+
+      const chipWait = Date.now()
+      while (Date.now() - chipWait < 4000) {
+        await revealResponderCopySection(page)
+        if (await hasCopyResponderLinkDialog(page)) return 'ok'
+        await delay(250)
+      }
+    }
+    diag.push(`chip Published không mở panel · ${await dumpFormDialogs(page)}`)
+    return 'skip'
+  }
+
+  // Bước 1: Publish trên toolbar (trừ khi dialog bước 2 đã mở) — click dễ mất khi
+  // cửa sổ khác giành focus nên phải bấm lại, mỗi vòng dọn dialog che rồi thử tiếp
+  let confirmPoint: ClickPoint | null = await locatePublishFormConfirm(page)
+  for (let attempt = 0; attempt < 3 && !confirmPoint; attempt++) {
     if (!toolbar) return 'skip'
-    await mouseClickPoint(page, toolbar)
+    if (attempt > 0) {
+      await page.bringToFront().catch(() => undefined)
+      const again = await clearPublishBlockers(page)
+      if (again.length) diag.push(`dọn: ${again.join(', ')}`)
+    }
+    await mouseClickPoint(page, (await locateToolbarPublish(page)) || toolbar)
     await delay(700)
     if (!(await locatePublishFormConfirm(page))) {
       await clickToolbarPublishDom(page)
       await delay(500)
     }
-  }
 
-  const dialogWait = Date.now()
-  let confirmPoint: ClickPoint | null = null
-  while (Date.now() - dialogWait < 12000) {
-    confirmPoint = await locatePublishFormConfirm(page)
-    if (confirmPoint) break
-    await delay(250)
+    const dialogWait = Date.now()
+    while (Date.now() - dialogWait < 6000) {
+      confirmPoint = await locatePublishFormConfirm(page)
+      if (confirmPoint) break
+      // Chip đã đổi sang Published (luồng khác vừa publish xong) → sang nhánh panel
+      if (await hasCopyResponderLinkDialog(page)) return 'ok'
+      await delay(250)
+    }
   }
-  if (!confirmPoint) return 'skip'
+  if (!confirmPoint) {
+    diag.push(`không thấy dialog Publish · ${await dumpFormDialogs(page)}`)
+    return 'skip'
+  }
 
   // Bước 2: Publish trong dialog
   await mouseClickPoint(page, confirmPoint)
@@ -1107,19 +1755,39 @@ async function publishFormViaToolbarDialog(page: Page): Promise<'ok' | 'skip'> {
     await clickPublishFormConfirmDom(page)
     await delay(400)
   }
+  diag.push('đã Publish')
 
   const panelWait = Date.now()
-  while (Date.now() - panelWait < 10000) {
+  while (Date.now() - panelWait < 15000) {
+    await revealResponderCopySection(page)
     if (await hasCopyResponderLinkDialog(page)) return 'ok'
+    // Tip "Got it" che — chỉ đóng tip, giữ Published options
+    const blockers = await clearPublishBlockers(page)
+    if (blockers.length) diag.push(`dọn: ${blockers.join(', ')}`)
+
+    if (await hasPublishedOptionsDialog(page)) {
+      await revealResponderCopySection(page)
+      if (await hasCopyResponderLinkDialog(page)) return 'ok'
+      await dismissPublishedOptionsWithoutCopy(page)
+      continue
+    }
+
     const again = await locateToolbarPublish(page)
     if (again?.kind === 'published') {
       await mouseClickPoint(page, again)
       await delay(600)
+      if (await clickCopyResponderMenuItem(page)) await delay(700)
+      await revealResponderCopySection(page)
       if (await hasCopyResponderLinkDialog(page)) return 'ok'
+      if (await hasPublishedOptionsDialog(page)) {
+        await dismissPublishedOptionsWithoutCopy(page)
+      }
     }
     await delay(300)
   }
-  return (await hasCopyResponderLinkDialog(page)) ? 'ok' : 'skip'
+  if (await hasCopyResponderLinkDialog(page)) return 'ok'
+  diag.push(`sau Publish vẫn chưa thấy panel · ${await dumpFormDialogs(page)}`)
+  return 'skip'
 }
 
 /**
@@ -1134,21 +1802,27 @@ async function publishAndGetFormLink(
 ): Promise<{ link: string; note: string }> {
   const fallbackLong = editUrlToViewform(editUrl) || editUrl.replace(/\/edit.*$/i, '/viewform')
   const styleLabel = linkStyle === 'short' ? 'ngắn' : 'dài'
+  const diag: string[] = []
   await delay(400)
 
-  await publishFormViaToolbarDialog(page)
+  // 5 Chrome chia ô: Publish + popover Copy phải tuần tự — mất focus là popover đóng / URL trống
+  return withFormLinkUi(async () => {
+    await page.bringToFront().catch(() => undefined)
+    await delay(200)
+    await publishFormViaToolbarDialog(page, diag)
 
-  const fromCopy = await extractLinkFromCopyResponderDialog(page, linkStyle)
-  if (fromCopy) {
+    const fromCopy = await extractLinkFromCopyResponderDialogUnlocked(page, linkStyle, diag)
+    if (fromCopy) {
+      await page.keyboard.press('Escape').catch(() => undefined)
+      return fromCopy
+    }
+
     await page.keyboard.press('Escape').catch(() => undefined)
-    return fromCopy
-  }
-
-  await page.keyboard.press('Escape').catch(() => undefined)
-  return {
-    link: cleanFormUrl(fallbackLong),
-    note: `không Copy được link ${styleLabel} · fallback viewform`
-  }
+    return {
+      link: cleanFormUrl(fallbackLong),
+      note: `không Copy được link ${styleLabel} [${diag.join(' ; ')}] · fallback viewform`
+    }
+  })
 }
 
 /** Điền 1 ô contenteditable / textarea trên Google Forms editor */
@@ -1206,6 +1880,143 @@ async function fillFormEditable(
     }
   }
   return false
+}
+
+/** Placeholder "Form description" thường không phải role=button — phải click rồi insertText. */
+async function fillFormDescriptionField(page: Page, value: string): Promise<boolean> {
+  const text = value.trim()
+  if (!text) return false
+  const needles = ['form description', 'mô tả biểu mẫu', 'description', 'mô tả']
+
+  for (const frame of framesOf(page)) {
+    const clicked = await frame
+      .evaluate((labels) => {
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') w.__cmReveal(el)
+          else {
+            try {
+              el.scrollIntoView({ block: 'center', inline: 'nearest' })
+            } catch {
+              // ignore
+            }
+          }
+        }
+        const ownText = (el: HTMLElement): string => {
+          const bits: string[] = []
+          for (const n of Array.from(el.childNodes)) {
+            if (n.nodeType === Node.TEXT_NODE) bits.push(n.textContent || '')
+          }
+          return bits.join('').replace(/\s+/g, ' ').trim().toLowerCase()
+        }
+        const nodes = Array.from(
+          document.querySelectorAll(
+            '[aria-label], [aria-placeholder], [contenteditable="true"], textarea, div, span, [role="textbox"]'
+          )
+        ) as HTMLElement[]
+        const hits: Array<{ el: HTMLElement; score: number }> = []
+        for (const el of nodes) {
+          const label = (
+            el.getAttribute('aria-label') ||
+            el.getAttribute('aria-placeholder') ||
+            el.getAttribute('placeholder') ||
+            ownText(el) ||
+            ''
+          )
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase()
+          if (!label || label.length > 48) continue
+          if (!labels.some((n) => label === n || label.startsWith(n))) continue
+          const inner = (el.innerText || '').replace(/\s+/g, ' ').trim()
+          if (inner.length > 80) continue
+          reveal(el)
+          const r = el.getBoundingClientRect()
+          if (r.width < 8 || r.height < 4) continue
+          let score = label.length
+          if (el.isContentEditable || el.tagName === 'TEXTAREA') score -= 20
+          hits.push({ el, score })
+        }
+        hits.sort((a, b) => a.score - b.score)
+        if (!hits[0]) return false
+        const el = hits[0].el
+        reveal(el)
+        el.click()
+        el.focus()
+        return true
+      }, needles)
+      .catch(() => false)
+    if (clicked) break
+  }
+
+  await delay(250)
+
+  for (const frame of framesOf(page)) {
+    const typed = await frame
+      .evaluate((expected) => {
+        const el = document.activeElement as HTMLElement | null
+        const targets: HTMLElement[] = []
+        if (el) targets.push(el)
+        targets.push(
+          ...Array.from(
+            document.querySelectorAll(
+              '[aria-label="Form description"], [aria-label="Mô tả biểu mẫu"], [aria-label="Description"], textarea[aria-label*="description" i], [contenteditable="true"][aria-label*="description" i]'
+            )
+          ).map((n) => n as HTMLElement)
+        )
+        const write = (node: HTMLElement): boolean => {
+          node.focus()
+          try {
+            document.execCommand('selectAll', false)
+          } catch {
+            // ignore
+          }
+          let ok = false
+          try {
+            ok = document.execCommand('insertText', false, expected)
+          } catch {
+            ok = false
+          }
+          if (!ok) {
+            if ('value' in node) {
+              const proto = Object.getOwnPropertyDescriptor(
+                window.HTMLTextAreaElement.prototype,
+                'value'
+              )
+              proto?.set?.call(node, expected)
+              ;(node as HTMLTextAreaElement).value = expected
+            } else {
+              node.textContent = expected
+            }
+          }
+          node.dispatchEvent(
+            new InputEvent('input', { bubbles: true, data: expected, inputType: 'insertText' })
+          )
+          node.dispatchEvent(new Event('change', { bubbles: true }))
+          const current = (node.textContent || (node as HTMLTextAreaElement).value || '').trim()
+          return current.includes(expected.trim())
+        }
+        for (const node of targets) {
+          if (write(node)) return true
+        }
+        return false
+      }, text)
+      .catch(() => false)
+    if (typed) return true
+  }
+
+  try {
+    await page.keyboard.down('Control')
+    await page.keyboard.press('KeyA')
+    await page.keyboard.up('Control')
+    await page.keyboard.type(text, { delay: 4 })
+  } catch {
+    // ignore
+  }
+  await delay(200)
+  return page
+    .evaluate((expected) => (document.body?.innerText || '').includes(expected.trim()), text)
+    .catch(() => false)
 }
 
 /**
@@ -1360,37 +2171,20 @@ async function fillGoogleFormFields(
     title
   )
 
-  let descOk = await fillFormEditable(
-    page,
-    [
-      '[aria-label="Form description"]',
-      '[aria-label="Mô tả biểu mẫu"]',
-      '[aria-label="Description"]',
-      '[aria-label="Mô tả"]',
-      'textarea[aria-label="Form description"]',
-      'div[aria-label="Form description"][contenteditable="true"]',
-      'textarea[placeholder*="Form description" i]',
-      'div[aria-placeholder*="Form description" i]',
-      'div[aria-placeholder*="mô tả" i]'
-    ],
-    description
-  )
-
-  if (description && !descOk) {
-    await clickByText(
-      page,
-      ['form description', 'mô tả biểu mẫu'],
-      2500,
-      ['theme', 'color', 'header', 'choose']
-    )
+  let descOk = await fillFormDescriptionField(page, description)
+  if (!descOk) {
     descOk = await fillFormEditable(
       page,
       [
         '[aria-label="Form description"]',
         '[aria-label="Mô tả biểu mẫu"]',
         '[aria-label="Description"]',
-        'div[contenteditable="true"][aria-label*="description" i]',
-        'div[aria-placeholder*="Form description" i]'
+        '[aria-label="Mô tả"]',
+        'textarea[aria-label="Form description"]',
+        'div[aria-label="Form description"][contenteditable="true"]',
+        'textarea[placeholder*="Form description" i]',
+        'div[aria-placeholder*="Form description" i]',
+        'div[aria-placeholder*="mô tả" i]'
       ],
       description
     )
@@ -1902,7 +2696,7 @@ async function uploadFormHeaderImage(page: Page, imagePath: string): Promise<str
             const band =
               typeof (window as Window & { __cmToolbarBand?: () => number }).__cmToolbarBand ===
               'function'
-                ? (window as Window & { __cmToolbarBand: () => number }).__cmToolbarBand()
+                ? ((window as Window & { __cmToolbarBand?: () => number }).__cmToolbarBand as () => number)()
                 : Math.max(180, Math.floor(window.innerHeight * 0.42))
             if (rect.top > band) return null // toolbar trên cùng (có thể xuống hàng khi chia ô)
             let score = 0
@@ -2369,7 +3163,7 @@ async function openFormThemePanel(page: Page): Promise<string> {
             const band =
               typeof (window as Window & { __cmToolbarBand?: () => number }).__cmToolbarBand ===
               'function'
-                ? (window as Window & { __cmToolbarBand: () => number }).__cmToolbarBand()
+                ? ((window as Window & { __cmToolbarBand?: () => number }).__cmToolbarBand as () => number)()
                 : Math.max(180, Math.floor(window.innerHeight * 0.42))
             if (rect.top > band) return null
             let score = 0
@@ -2831,7 +3625,15 @@ async function openGoogleForm(
 
     await runStep('publish', async () => {
       await delay(500)
-      const published = await publishAndGetFormLink(page, editUrl, linkStyle)
+      // Form editor hay rebuild iframe khi vừa đổi theme → thử lại 1 lần nếu frame chết
+      let published: { link: string; note: string }
+      try {
+        published = await publishAndGetFormLink(page, editUrl, linkStyle)
+      } catch (error) {
+        if (!isDetachedError(error)) throw error
+        await delay(1500)
+        published = await publishAndGetFormLink(page, editUrl, linkStyle)
+      }
       parts.push(`link(${linkStyle}): ${published.note} → ${published.link}`)
       formUrl = published.link
     })
@@ -2972,7 +3774,7 @@ export async function open2faLiveTab(
       }
     }
 
-    await secretBox.click({ clickCount: 3 }).catch(() => undefined)
+    await secretBox.click({ count: 3 }).catch(() => undefined)
     await page.evaluate((value) => {
       const area = document.querySelector('textarea')
       if (!area) return
@@ -2984,7 +3786,7 @@ export async function open2faLiveTab(
     }, raw)
     const shown = await page.evaluate(() => (document.querySelector('textarea') as HTMLTextAreaElement | null)?.value || '')
     if (shown.replace(/\s+/g, '') !== raw.replace(/\s+/g, '')) {
-      await secretBox.click({ clickCount: 3 }).catch(() => undefined)
+      await secretBox.click({ count: 3 }).catch(() => undefined)
       await page.keyboard.down('Control')
       await page.keyboard.press('KeyA')
       await page.keyboard.up('Control')
@@ -3556,6 +4358,84 @@ async function isSignInToProjectScreen(page: Page): Promise<boolean> {
   return (await readOauthUi(page)).signInProject
 }
 
+/** Nút "Scroll down" trên màn OAuth — phải xuống hết danh sách quyền mới bấm được Continue. */
+async function clickOAuthScrollDownFab(page: Page): Promise<boolean> {
+  for (const frame of framesOf(page)) {
+    const clicked = await frame
+      .evaluate(() => {
+        const norm = (s: string | null): string =>
+          (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const fab = (
+          Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[]
+        ).find((el) => {
+          const t = norm(el.innerText || el.getAttribute('aria-label'))
+          return t === 'scroll down' || t === 'cuộn xuống'
+        })
+        if (!fab) return false
+        fab.click()
+        // Lăn luôn khung quyền xuống đáy cho chắc
+        for (const el of Array.from(document.querySelectorAll('div, main, section')) as HTMLElement[]) {
+          const st = window.getComputedStyle(el)
+          if (/(auto|scroll|overlay)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 16) {
+            el.scrollTop = el.scrollHeight
+          }
+        }
+        return true
+      })
+      .catch(() => false)
+    if (clicked) {
+      await delay(350)
+      return true
+    }
+  }
+  return false
+}
+
+/** Ảnh chụp nhanh màn OAuth (tiêu đề + các nút, kèm cờ bị che / ngoài viewport) để ghi log. */
+async function dumpOauthScreen(page: Page): Promise<string> {
+  const out: string[] = []
+  for (const frame of framesOf(page)) {
+    const line = await frame
+      .evaluate(() => {
+        const short = (t: string, n: number): string => t.replace(/\s+/g, ' ').trim().slice(0, n)
+        const heading = short(
+          (Array.from(document.querySelectorAll('h1, h2, #headingText')) as HTMLElement[])
+            .map((h) => h.innerText || '')
+            .filter(Boolean)
+            .join(' | '),
+          70
+        )
+        const btns = (
+          Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[]
+        )
+          .map((el) => {
+            const t = short(el.innerText || el.getAttribute('aria-label') || '', 16)
+            if (!t) return ''
+            const r = el.getBoundingClientRect()
+            if (r.width < 8 || r.height < 8) return ''
+            const s = window.getComputedStyle(el)
+            const hidden =
+              s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0
+            const cx = r.left + r.width / 2
+            const cy = r.top + r.height / 2
+            const outside =
+              cx < 1 || cy < 1 || cx > window.innerWidth - 1 || cy > window.innerHeight - 1
+            const top = outside ? null : document.elementFromPoint(cx, cy)
+            const covered = Boolean(
+              top && top !== el && !el.contains(top) && !top.contains(el)
+            )
+            return `${t}@${Math.round(r.left)},${Math.round(r.top)}|${Math.round(r.width)}x${Math.round(r.height)}${hidden ? '|ẩn' : ''}${outside ? '|ngoài' : ''}${covered ? '|bịche' : ''}`
+          })
+          .filter(Boolean)
+        if (!heading && !btns.length) return ''
+        return `vp=${window.innerWidth}x${window.innerHeight} h="${heading}" [${btns.join(' ; ')}]`
+      })
+      .catch(() => '')
+    if (line) out.push(line)
+  }
+  return out.join(' || ').slice(0, 900)
+}
+
 async function isGoogleAccountChooserScreen(page: Page): Promise<boolean> {
   return (await readOauthUi(page)).chooser
 }
@@ -3563,21 +4443,48 @@ async function isGoogleAccountChooserScreen(page: Page): Promise<boolean> {
 async function clickLiveElement(page: Page, el: ElementHandle<Element>): Promise<boolean> {
   await el
     .evaluate((node) => {
-      ;(node as HTMLElement).scrollIntoView({ block: 'center', inline: 'center' })
+      const btn = node as HTMLElement
+      const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+      if (typeof w.__cmReveal === 'function') {
+        w.__cmReveal(btn)
+        return
+      }
+      try {
+        btn.scrollIntoView({ block: 'center', inline: 'center' })
+      } catch {
+        // ignore
+      }
+      let p: HTMLElement | null = btn.parentElement
+      while (p && p !== document.body) {
+        const st = window.getComputedStyle(p)
+        if (/(auto|scroll|overlay)/.test(st.overflowY) && p.scrollHeight > p.clientHeight + 8) {
+          const er = btn.getBoundingClientRect()
+          const pr = p.getBoundingClientRect()
+          p.scrollTop += er.top + er.height / 2 - (pr.top + pr.height / 2)
+        }
+        p = p.parentElement
+      }
     })
     .catch(() => undefined)
   await delay(80)
   const box = await el.boundingBox().catch(() => null)
+  const vp = await page
+    .evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }))
+    .catch(() => null)
   if (box && box.width > 2 && box.height > 2) {
     const x = box.x + box.width / 2
     const y = box.y + box.height / 2
-    try {
-      await page.mouse.move(x, y, { steps: 4 })
-      await delay(40)
-      await page.mouse.click(x, y, { delay: 50 })
-      return true
-    } catch {
-      // fallback bên dưới
+    const inView =
+      !vp || (x > 2 && y > 2 && x < vp.w - 2 && y < vp.h - 2)
+    if (inView) {
+      try {
+        await page.mouse.move(x, y, { steps: 4 })
+        await delay(40)
+        await page.mouse.click(x, y, { delay: 50 })
+        return true
+      } catch {
+        // fallback DOM
+      }
     }
   }
   try {
@@ -3608,6 +4515,76 @@ async function clickLiveElement(page: Page, el: ElementHandle<Element>): Promise
       .catch(() => undefined)
   }
   return true
+}
+
+/** Cuộn thanh Cancel | Continue trên màn "Sign in to Untitled project" vào viewport. */
+async function scrollOAuthSignInContinueIntoView(page: Page): Promise<boolean> {
+  await installViewportHelpers(page)
+  for (const frame of framesOf(page)) {
+    const ok = await frame
+      .evaluate(() => {
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') {
+            w.__cmReveal(el)
+            return
+          }
+          try {
+            el.scrollIntoView({ block: 'end', inline: 'nearest' })
+          } catch {
+            // ignore
+          }
+          let p: HTMLElement | null = el.parentElement
+          while (p && p !== document.body) {
+            const st = window.getComputedStyle(p)
+            if (/(auto|scroll|overlay)/.test(st.overflowY) && p.scrollHeight > p.clientHeight + 8) {
+              p.scrollTop = p.scrollHeight
+            }
+            p = p.parentElement
+          }
+        }
+        const isContinue = (el: HTMLElement): boolean => {
+          const t = (el.innerText || el.getAttribute('aria-label') || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase()
+          return t === 'continue' || t === 'tiếp tục'
+        }
+        const buttons = Array.from(
+          document.querySelectorAll(
+            'button[jsname="LgbsSe"], button.VfPpkd-LgbsSe, button, [role="button"]'
+          )
+        ) as HTMLElement[]
+        // Chỉ lấy nút của view đang hiển thị (view ẩn vẫn còn trong DOM)
+        const hit = buttons.find((el) => {
+          if (!isContinue(el)) return false
+          const r = el.getBoundingClientRect()
+          if (r.width < 32 || r.height < 16) return false
+          const s = window.getComputedStyle(el)
+          return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) !== 0
+        })
+        if (!hit) {
+          window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight)
+          return false
+        }
+        // Cuộn đúng các khung chứa nút, không quét toàn bộ div (chậm khi chạy nhiều luồng)
+        let p: HTMLElement | null = hit.parentElement
+        while (p && p !== document.body) {
+          const st = window.getComputedStyle(p)
+          if (/(auto|scroll|overlay)/.test(st.overflowY) && p.scrollHeight > p.clientHeight + 16) {
+            p.scrollTop = p.scrollHeight
+          }
+          p = p.parentElement
+        }
+        window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight)
+        reveal(hit)
+        const r = hit.getBoundingClientRect()
+        return r.width > 8 && r.height > 8 && r.top < window.innerHeight && r.bottom > 0
+      })
+      .catch(() => false)
+    if (ok) return true
+  }
+  return false
 }
 
 /**
@@ -3735,74 +4712,115 @@ type SignInContinueResult = 'ok' | 'skip' | 'fail'
  * Nút Material Google: <button jsname="LgbsSe"> <span jsname="V67aGc">Continue</span>
  * Phải click BUTTON (jsaction trên button), không click span / tọa độ mù.
  */
-async function clickOAuthLgbsSeButton(page: Page, labels: string[]): Promise<boolean> {
+type OAuthButtonPick = { el: ElementHandle<Element>; score: number }
+
+/**
+ * Tìm nút OAuth theo nhãn chính xác, chấm điểm để không bấm nhầm nút của view ẩn
+ * (accounts.google.com giữ nhiều view trong DOM, view ngoài màn hình vẫn có kích thước).
+ * 3 = nhìn thấy & không bị che · 2 = trong viewport nhưng bị che · 1 = ngoài viewport.
+ */
+async function pickOAuthButton(page: Page, labels: string[]): Promise<OAuthButtonPick | null> {
   const needles = labels.map((l) => l.toLowerCase())
+  let best: OAuthButtonPick | null = null
   for (const frame of framesOf(page)) {
     let handle: Awaited<ReturnType<Frame['evaluateHandle']>> | null = null
     try {
       handle = await frame.evaluateHandle((needlesIn: string[]) => {
-        const vis = (el: HTMLElement): boolean => {
-          const r = el.getBoundingClientRect()
-          if (r.width < 32 || r.height < 16) return false
-          const s = window.getComputedStyle(el)
-          if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) {
-            return false
-          }
-          if (typeof el.checkVisibility === 'function') {
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') w.__cmReveal(el)
+          else {
             try {
-              if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
-                return false
-              }
+              el.scrollIntoView({ block: 'center', inline: 'nearest' })
             } catch {
               // ignore
             }
           }
+        }
+        const scoreOf = (el: HTMLElement): number => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return 0
           let p: HTMLElement | null = el.parentElement
           while (p && p !== document.body) {
             const ps = window.getComputedStyle(p)
-            if (ps.display === 'none' || ps.visibility === 'hidden') return false
+            if (ps.display === 'none' || ps.visibility === 'hidden') return 0
+            if (p.getAttribute('aria-hidden') === 'true') return 0
             p = p.parentElement
           }
-          const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
-          if (top && top !== el && !el.contains(top) && !top.contains(el)) return false
-          return true
+          const r = el.getBoundingClientRect()
+          if (r.width < 32 || r.height < 16) return 0
+          const cx = r.left + r.width / 2
+          const cy = r.top + r.height / 2
+          if (cx < 1 || cy < 1 || cx > window.innerWidth - 1 || cy > window.innerHeight - 1) return 1
+          const top = document.elementFromPoint(cx, cy)
+          return top && (top === el || el.contains(top) || top.contains(el)) ? 3 : 2
         }
         const buttons = Array.from(
-          document.querySelectorAll('button[jsname="LgbsSe"], button.VfPpkd-LgbsSe')
-        ) as HTMLButtonElement[]
-        const hits: HTMLButtonElement[] = []
+          document.querySelectorAll(
+            'button[jsname="LgbsSe"], button.VfPpkd-LgbsSe, button, [role="button"]'
+          )
+        ) as HTMLElement[]
+        let winner: HTMLElement | null = null
+        let winScore = 0
+        let winLeft = -Infinity
         for (const btn of buttons) {
-          if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue
+          if (
+            (btn as HTMLButtonElement).disabled ||
+            btn.getAttribute('aria-disabled') === 'true'
+          ) {
+            continue
+          }
           const span = btn.querySelector(
             'span[jsname="V67aGc"], span.VfPpkd-vQzf8d'
           ) as HTMLElement | null
-          const text = (span?.innerText || btn.innerText || '')
+          const text = (span?.innerText || btn.innerText || btn.getAttribute('aria-label') || '')
             .replace(/\s+/g, ' ')
             .trim()
             .toLowerCase()
           if (!needlesIn.some((n) => text === n)) continue
-          if (!vis(btn)) continue
-          hits.push(btn)
+          reveal(btn)
+          const sc = scoreOf(btn)
+          if (sc === 0) continue
+          const left = btn.getBoundingClientRect().left
+          // Continue luôn nằm bên phải Cancel
+          if (sc > winScore || (sc === winScore && left > winLeft)) {
+            winner = btn
+            winScore = sc
+            winLeft = left
+          }
         }
-        if (!hits.length) return null
-        hits.sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)
-        return hits[0]
+        ;(window as Window & { __cmBtnScore?: number }).__cmBtnScore = winScore
+        return winner
       }, needles)
       const el = handle.asElement() as ElementHandle<Element> | null
       if (!el) {
         await handle.dispose().catch(() => undefined)
         continue
       }
-      await clickLiveElement(page, el)
-      await el.dispose().catch(() => undefined)
-      await handle.dispose().catch(() => undefined)
-      return true
+      const score = await frame
+        .evaluate(() => (window as Window & { __cmBtnScore?: number }).__cmBtnScore || 1)
+        .catch(() => 1)
+      if (!best || score > best.score) {
+        await best?.el.dispose().catch(() => undefined)
+        best = { el, score }
+      } else {
+        await el.dispose().catch(() => undefined)
+      }
+      if (best.score >= 3) break
     } catch {
       await handle?.dispose().catch(() => undefined)
       continue
     }
   }
-  return false
+  return best
+}
+
+async function clickOAuthLgbsSeButton(page: Page, labels: string[]): Promise<boolean> {
+  const pick = await pickOAuthButton(page, labels)
+  if (!pick) return false
+  await clickLiveElement(page, pick.el)
+  await pick.el.dispose().catch(() => undefined)
+  return true
 }
 
 /**
@@ -3814,6 +4832,7 @@ async function clickSignInToProjectContinue(
   timeoutMs = 25000
 ): Promise<SignInContinueResult> {
   await page.bringToFront().catch(() => undefined)
+  await installViewportHelpers(page)
   const started = Date.now()
   let sawScreen = false
 
@@ -3834,14 +4853,16 @@ async function clickSignInToProjectContinue(
       })
       .catch(() => false)
 
-  while (Date.now() - started < Math.min(15000, timeoutMs)) {
+  // Nửa đầu ngân sách để chờ màn hình hiện ra, nửa sau dành riêng cho việc bấm
+  const waitBudget = Math.min(15000, Math.max(6000, Math.floor(timeoutMs / 2)))
+  while (Date.now() - started < waitBudget) {
     const ui = await readOauthUi(page)
     if (ui.chooser) return 'skip'
     if (ui.signInProject) {
       sawScreen = true
       break
     }
-    // Đang ở interstitial Advanced → Sign in chưa tới, đừng chờ 15s
+    // Đang ở interstitial Advanced → Sign in chưa tới, đừng chờ hết ngân sách
     if (await hasAdvancedLink()) return 'skip'
     if (await pastSignIn()) return 'skip'
     await delay(300)
@@ -3852,16 +4873,37 @@ async function clickSignInToProjectContinue(
     else return 'skip'
   }
 
-  while (Date.now() - started < timeoutMs) {
+  const clickDeadline = Date.now() + Math.max(25000, timeoutMs - (Date.now() - started))
+  let attempt = 0
+  while (Date.now() < clickDeadline) {
     if (!(await isSignInToProjectScreen(page))) return 'ok'
 
-    const clicked =
-      (await clickOAuthLgbsSeButton(page, ['continue', 'tiếp tục'])) ||
-      (await clickExactOAuthButton(page, ['continue', 'tiếp tục']))
+    await clickOAuthScrollDownFab(page)
+    await scrollOAuthSignInContinueIntoView(page)
+    await delay(200)
 
-    await delay(clicked ? 1200 : 400)
-    if (!(await isSignInToProjectScreen(page))) return 'ok'
-    if (await pastSignIn()) return 'ok'
+    const pick = await pickOAuthButton(page, ['continue', 'tiếp tục'])
+    if (pick) {
+      // Nút bị lớp khác phủ → chuột không tới được, đổi sang focus + Enter
+      if (attempt % 3 === 2) {
+        await pick.el.evaluate((el) => (el as HTMLElement).focus()).catch(() => undefined)
+        await page.keyboard.press('Enter').catch(() => undefined)
+      } else {
+        await clickLiveElement(page, pick.el)
+      }
+      await pick.el.dispose().catch(() => undefined)
+    } else {
+      await clickExactOAuthButton(page, ['continue', 'tiếp tục'])
+    }
+    attempt += 1
+
+    // 5 Chrome song song: chuyển trang rất chậm — chờ có nhịp thay vì 1 nhịp cố định
+    const settle = Date.now()
+    while (Date.now() - settle < 5000) {
+      await delay(400)
+      if (!(await isSignInToProjectScreen(page))) return 'ok'
+      if (await pastSignIn()) return 'ok'
+    }
   }
 
   return sawScreen ? 'fail' : 'skip'
@@ -4058,7 +5100,7 @@ async function completeUnverifiedAppConsent(
       }
 
       if (await isSignInToProjectScreen(page)) {
-        const r = await clickSignInToProjectContinue(page, 18000)
+        const r = await clickSignInToProjectContinue(page, 30000)
         if (!signNoted) {
           notes.push(
             r === 'ok'
@@ -4067,6 +5109,7 @@ async function completeUnverifiedAppConsent(
                 ? `Sign in Continue FAIL (${tag})`
                 : `không bấm được Sign in Continue (${tag})`
           )
+          if (r === 'fail') notes.push(`màn Sign in: ${await dumpOauthScreen(page)}`)
           signNoted = true
         }
         await delay(700)
@@ -4161,15 +5204,17 @@ async function completeUnverifiedAppConsent(
   }
 
   // Bắt buộc: Sign in to Untitled project → Continue, rồi mới checkbox
-  await signInThenWaitScopes(28000, sawInterstitial ? 'sau unsafe' : 'trước checkbox')
+  // Chạy nhiều Chrome song song nên màn OAuth tải rất chậm — nới ngân sách chờ
+  await signInThenWaitScopes(75000, sawInterstitial ? 'sau unsafe' : 'trước checkbox')
 
-  // 3) Select all — bắt buộc tick trước khi Continue
+  // 3) Lăn tới hàng "Select all" và chỉ tick ô đó — không tick từng quyền
   let tick = await checkOAuthPermissionBox(page)
   notes.push(
     tick.ok
-      ? `đã tick Select all / quyền (${tick.checked}/${tick.total})`
-      : `không tick được checkbox (${tick.checked}/${tick.total})`
+      ? 'đã tick Select all'
+      : `không tick được Select all (${tick.checked}/${tick.total})`
   )
+  if (!tick.ok) notes.push(`màn consent: ${await dumpOauthScreen(page)}`)
   await delay(500)
 
   // 4) Allow (màn cũ, nút đúng chữ "Allow") — không nhầm hàng "Allow this application…"
@@ -4189,19 +5234,39 @@ async function completeUnverifiedAppConsent(
       'muốn truy cập'
     ])
 
+  // Google có thể hỏi consent 2 lượt; nhiều luồng thì mỗi lượt chuyển trang rất chậm
   let continued = false
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     if (!tick.ok) {
+      // Chỉ thử lại đúng ô Select all — không tick từng scope
       tick = await checkOAuthPermissionBox(page)
-      if (attempt > 0) notes.push(`retry tick ${tick.checked}/${tick.total}`)
+      if (attempt > 0) notes.push(tick.ok ? 'retry Select all OK' : 'retry Select all FAIL')
     }
-    if (!tick.ok) break
-    continued =
+    if (!tick.ok) {
+      await delay(600)
+      continue
+    }
+
+    await clickOAuthScrollDownFab(page)
+    const clicked =
       (await clickExactOAuthButton(page, ['continue', 'tiếp tục'])) ||
       (await clickOAuthContinue(page))
-    if (!continued) break
-    await delay(1000)
-    if (!(await stillConsent())) break
+    if (!clicked) {
+      await delay(700)
+      continue
+    }
+
+    continued = true
+    const settle = Date.now()
+    let left = false
+    while (Date.now() - settle < 6000) {
+      await delay(350)
+      if (!(await stillConsent())) {
+        left = true
+        break
+      }
+    }
+    if (left) break
     continued = false
     tick = { ok: false, checked: tick.checked, total: tick.total }
   }
@@ -4363,6 +5428,11 @@ async function clickExactOAuthButton(page: Page, labels: string[]): Promise<bool
               'button, [role="button"], [class*="VfPpkd"], [class*="UywwFc"], [jsaction]'
             ) as HTMLElement | null) || el
           if (btn.getAttribute('aria-disabled') === 'true' || btn.hasAttribute('disabled')) continue
+          try {
+            btn.scrollIntoView({ block: 'center', inline: 'nearest' })
+          } catch {
+            // ignore
+          }
           const r = btn.getBoundingClientRect()
           if (r.width < 40 || r.height < 20) continue
           hits.push({
@@ -4393,30 +5463,16 @@ async function clickExactOAuthButton(page: Page, labels: string[]): Promise<bool
   return false
 }
 
-async function readOAuthConsentBoxes(
+/**
+ * Tìm ô checkbox của hàng "Select all" — có cuộn xuống cho hàng vào viewport
+ * (trang consent cao hơn cửa sổ chia ô), nhưng CHỈ lấy ô của hàng Select all.
+ */
+async function readOAuthSelectAllBox(
   page: Page
-): Promise<{ frame: Frame; boxes: OAuthBoxSnap[] } | null> {
+): Promise<{ frame: Frame; box: OAuthBoxSnap } | null> {
   for (const frame of framesOf(page)) {
     try {
-      const boxes = await frame.evaluate(() => {
-        const vis = (el: HTMLElement): boolean => {
-          try {
-            el.scrollIntoView({ block: 'center', inline: 'nearest' })
-          } catch {
-            // ignore
-          }
-          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
-          if (typeof w.__cmReveal === 'function') w.__cmReveal(el)
-          const r = el.getBoundingClientRect()
-          const s = window.getComputedStyle(el)
-          return (
-            r.width >= 12 &&
-            r.height >= 12 &&
-            s.display !== 'none' &&
-            s.visibility !== 'hidden' &&
-            s.opacity !== '0'
-          )
-        }
+      const box = await frame.evaluate(() => {
         const norm = (s: string): string => s.replace(/\s+/g, ' ').trim().toLowerCase()
         const isChecked = (el: HTMLElement): boolean => {
           if (el instanceof HTMLInputElement) return el.checked
@@ -4427,97 +5483,94 @@ async function readOAuthConsentBoxes(
           const cls = `${el.className || ''}`
           return /OWXEXe-auswjd|OWXEXe-pI13qd/.test(cls)
         }
-
-        const selectAllRect = (() => {
-          const els = Array.from(document.querySelectorAll('span, div, label, p, h2, h3')) as HTMLElement[]
-          let best: HTMLElement | null = null
-          let bestArea = Infinity
-          for (const el of els) {
-            const t = norm(el.innerText || el.getAttribute('aria-label') || '')
-            if (t !== 'select all' && t !== 'chọn tất cả') continue
-            try {
-              el.scrollIntoView({ block: 'center', inline: 'nearest' })
-            } catch {
-              // ignore
-            }
-            const r = el.getBoundingClientRect()
-            if (r.width <= 0 || r.height <= 0) continue
-            const area = r.width * r.height
-            if (area < bestArea) {
-              bestArea = area
-              best = el
-            }
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') {
+            w.__cmReveal(el)
+            return
           }
-          return best ? best.getBoundingClientRect() : null
-        })()
-
-        const widgets = Array.from(
-          document.querySelectorAll(
-            '[role="checkbox"], input[type="checkbox"], div.VfPpkd-MPu53c, [jsname="ornU0b"]'
-          )
-        ) as HTMLElement[]
-
-        const seen = new Set<HTMLElement>()
-        const boxes: Array<{
-          kind: 'select-all' | 'scope'
-          checked: boolean
-          x: number
-          y: number
-        }> = []
-
-        for (const el of widgets) {
-          const box = (
-            el.getAttribute('role') === 'checkbox'
-              ? el
-              : el.matches('input[type="checkbox"]')
-                ? el
-                : ((el.querySelector('[role="checkbox"]') as HTMLElement | null) || el)
-          ) as HTMLElement
-          if (seen.has(box) || !vis(box)) continue
-          seen.add(box)
-          const r = box.getBoundingClientRect()
-          const sameRow = Boolean(
-            selectAllRect &&
-              Math.abs(r.top + r.height / 2 - (selectAllRect.top + selectAllRect.height / 2)) < 22
-          )
-          boxes.push({
-            kind: sameRow ? 'select-all' : 'scope',
-            checked: isChecked(box),
-            x: r.left + Math.min(10, Math.max(6, r.width / 2)),
-            y: r.top + r.height / 2
-          })
+          try {
+            el.scrollIntoView({ block: 'center', inline: 'nearest' })
+          } catch {
+            // ignore
+          }
         }
 
-        if (boxes.length === 0 && selectAllRect) {
-          const candidates = Array.from(document.querySelectorAll('div, span, input')) as HTMLElement[]
+        // Nhãn "Select all" — chỉ nhận node có đúng chữ đó (không lấy cả khối quyền)
+        const labels = Array.from(
+          document.querySelectorAll('span, div, label, p, h2, h3')
+        ) as HTMLElement[]
+        let label: HTMLElement | null = null
+        let bestArea = Infinity
+        for (const el of labels) {
+          const t = norm(el.innerText || el.getAttribute('aria-label') || '')
+          if (t !== 'select all' && t !== 'chọn tất cả') continue
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') continue
+          const r0 = el.getBoundingClientRect()
+          if (r0.width <= 0 || r0.height <= 0) continue
+          const area = r0.width * r0.height
+          if (area < bestArea) {
+            bestArea = area
+            label = el
+          }
+        }
+        if (!label) return null
+
+        // Cuộn hàng Select all vào viewport rồi mới đo toạ độ
+        reveal(label)
+        const labelRect = label.getBoundingClientRect()
+
+        const row =
+          (label.closest('label, li, div[role="listitem"]') as HTMLElement | null) ||
+          (label.parentElement as HTMLElement | null) ||
+          label
+        let target =
+          (row.querySelector(
+            '[role="checkbox"], input[type="checkbox"], div.VfPpkd-MPu53c, [jsname="ornU0b"]'
+          ) as HTMLElement | null) || null
+
+        if (!target) {
+          // Ô checkbox nằm bên TRÁI nhãn Select all, cùng hàng
+          const widgets = Array.from(
+            document.querySelectorAll(
+              '[role="checkbox"], input[type="checkbox"], div.VfPpkd-MPu53c, [jsname="ornU0b"]'
+            )
+          ) as HTMLElement[]
           let best: HTMLElement | null = null
           let bestDx = 9999
-          for (const c of candidates) {
-            const r = c.getBoundingClientRect()
-            if (r.width < 12 || r.width > 44 || r.height < 12 || r.height > 44) continue
-            if (Math.abs(r.top + r.height / 2 - (selectAllRect.top + selectAllRect.height / 2)) > 18) {
+          for (const w of widgets) {
+            const r = w.getBoundingClientRect()
+            if (r.width < 10 || r.width > 48 || r.height < 10 || r.height > 48) continue
+            if (Math.abs(r.top + r.height / 2 - (labelRect.top + labelRect.height / 2)) > 24) {
               continue
             }
-            const dx = selectAllRect.left - (r.left + r.width / 2)
-            if (dx > 4 && dx < bestDx) {
+            const dx = labelRect.left - (r.left + r.width / 2)
+            if (dx > 0 && dx < bestDx) {
               bestDx = dx
-              best = c
+              best = w
             }
           }
-          if (best) {
-            const r = best.getBoundingClientRect()
-            boxes.push({
-              kind: 'select-all',
-              checked: isChecked(best),
-              x: r.left + Math.min(10, r.width / 2),
-              y: r.top + r.height / 2
-            })
-          }
+          target = best
         }
 
-        return boxes
+        if (!target) {
+          return {
+            kind: 'select-all' as const,
+            checked: false,
+            x: labelRect.left + Math.min(12, labelRect.width / 2),
+            y: labelRect.top + labelRect.height / 2
+          }
+        }
+        const r = target.getBoundingClientRect()
+        return {
+          kind: 'select-all' as const,
+          checked: isChecked(target),
+          x: r.left + Math.min(10, Math.max(6, r.width / 2)),
+          y: r.top + r.height / 2
+        }
       })
-      if (boxes.length) return { frame, boxes }
+      if (box) return { frame, box }
     } catch {
       continue
     }
@@ -4526,86 +5579,134 @@ async function readOAuthConsentBoxes(
 }
 
 /**
- * Tick quyền OAuth granular: ô Select all bên trái nhãn, rồi từng scope bên phải nếu cần.
+ * OAuth consent: cuộn xuống tới hàng "Select all" và CHỈ tick ô đó
+ * (không tick từng scope bên dưới).
  */
 async function checkOAuthPermissionBox(page: Page): Promise<OAuthTickResult> {
   await installViewportHelpers(page)
-  const tally = (boxes: OAuthBoxSnap[]): OAuthTickResult => {
-    const checked = boxes.filter((b) => b.checked).length
-    const total = boxes.length
-    const selectAllOn = boxes.some((b) => b.kind === 'select-all' && b.checked)
-    const scopes = boxes.filter((b) => b.kind === 'scope')
-    const scopesOn = scopes.filter((b) => b.checked).length
-    const ok =
-      selectAllOn ||
-      (scopes.length > 0 && scopesOn === scopes.length) ||
-      (total > 0 && checked === total)
-    return { ok, checked, total }
+
+  const clickSelectAllRow = async (frame: Frame, box: OAuthBoxSnap): Promise<void> => {
+    // DOM click vào đúng hàng Select all (đã cuộn vào viewport)
+    const clicked = await frame
+      .evaluate(() => {
+        const norm = (s: string): string => s.replace(/\s+/g, ' ').trim().toLowerCase()
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') {
+            w.__cmReveal(el)
+            return
+          }
+          try {
+            el.scrollIntoView({ block: 'center', inline: 'nearest' })
+          } catch {
+            // ignore
+          }
+        }
+
+        const labels = Array.from(document.querySelectorAll('span, div, label')) as HTMLElement[]
+        let label: HTMLElement | null = null
+        let bestArea = Infinity
+        for (const el of labels) {
+          const t = norm(el.innerText || el.getAttribute('aria-label') || '')
+          if (t !== 'select all' && t !== 'chọn tất cả') continue
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') continue
+          const r = el.getBoundingClientRect()
+          if (r.width <= 0 || r.height <= 0) continue
+          const area = r.width * r.height
+          if (area < bestArea) {
+            bestArea = area
+            label = el
+          }
+        }
+        if (!label) return false
+        reveal(label)
+        const labelRect = label.getBoundingClientRect()
+        const row =
+          (label.closest('label, li, div[role="listitem"]') as HTMLElement | null) || label
+        let target =
+          (row.querySelector(
+            '[role="checkbox"], input[type="checkbox"], div.VfPpkd-MPu53c'
+          ) as HTMLElement | null) || null
+        if (!target) {
+          const widgets = Array.from(
+            document.querySelectorAll(
+              '[role="checkbox"], input[type="checkbox"], div.VfPpkd-MPu53c'
+            )
+          ) as HTMLElement[]
+          let best: HTMLElement | null = null
+          let bestDx = 9999
+          for (const w of widgets) {
+            const r = w.getBoundingClientRect()
+            if (r.width < 10 || r.width > 48 || r.height < 10 || r.height > 48) continue
+            if (Math.abs(r.top + r.height / 2 - (labelRect.top + labelRect.height / 2)) > 24) {
+              continue
+            }
+            const dx = labelRect.left - (r.left + r.width / 2)
+            if (dx > 0 && dx < bestDx) {
+              bestDx = dx
+              best = w
+            }
+          }
+          target = best
+        }
+        const hit = target || label
+        hit.dispatchEvent(
+          new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 })
+        )
+        hit.dispatchEvent(
+          new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 })
+        )
+        hit.click()
+        const input =
+          hit instanceof HTMLInputElement
+            ? hit
+            : (hit.querySelector('input[type="checkbox"]') as HTMLInputElement | null)
+        if (input && !input.checked) input.click()
+        return true
+      })
+      .catch(() => false)
+
+    if (clicked) return
+
+    const abs = await framePointToPage(page, frame, box)
+    try {
+      await page.mouse.move(abs.x, abs.y, { steps: 2 })
+      await delay(40)
+      await page.mouse.click(abs.x, abs.y, { delay: 35 })
+    } catch {
+      // ignore
+    }
   }
 
   const started = Date.now()
-  while (Date.now() - started < 22000) {
-    const found = await readOAuthConsentBoxes(page)
+  while (Date.now() - started < 25000) {
+    const found = await readOAuthSelectAllBox(page)
     if (!found) {
       await delay(400)
       continue
     }
-    let { frame, boxes } = found
-    let stats = tally(boxes)
-    if (stats.ok) return stats
-
-    const selectAll = boxes.find((b) => b.kind === 'select-all' && !b.checked)
-    const toClick = selectAll ? [selectAll] : boxes.filter((b) => !b.checked)
-
-    for (const box of toClick) {
-      await frame
-        .evaluate(
-          (x, y) => {
-            const el = document.elementFromPoint(x, y) as HTMLElement | null
-            const target = el?.closest('[role="checkbox"], input, label, div') as HTMLElement | null
-            try {
-              ;(target || el)?.scrollIntoView({ block: 'center', inline: 'nearest' })
-            } catch {
-              // ignore
-            }
-          },
-          box.x,
-          box.y
-        )
-        .catch(() => undefined)
-      const abs = await framePointToPage(page, frame, box)
-      try {
-        await page.mouse.move(abs.x, abs.y, { steps: 2 })
-        await delay(40)
-        await page.mouse.click(abs.x, abs.y, { delay: 35 })
-      } catch {
-        try {
-          await frame.evaluate(
-            (x, y) => {
-              const el = document.elementFromPoint(x, y) as HTMLElement | null
-              el?.click()
-            },
-            box.x,
-            box.y
-          )
-        } catch {
-          // ignore
-        }
-      }
-      await delay(400)
-      const again = await readOAuthConsentBoxes(page)
-      if (again) {
-        frame = again.frame
-        boxes = again.boxes
-        stats = tally(boxes)
-        if (stats.ok) return stats
-      }
+    if (found.box.checked) {
+      return { ok: true, checked: 1, total: 1 }
     }
-    await delay(400)
+
+    await clickSelectAllRow(found.frame, found.box)
+    await delay(450)
+
+    const after = await readOAuthSelectAllBox(page)
+    if (after?.box.checked) {
+      return { ok: true, checked: 1, total: 1 }
+    }
+    await delay(350)
   }
 
-  const last = await readOAuthConsentBoxes(page)
-  return last ? tally(last.boxes) : { ok: false, checked: 0, total: 0 }
+  const last = await readOAuthSelectAllBox(page)
+  if (!last) return { ok: false, checked: 0, total: 0 }
+  return {
+    ok: last.box.checked,
+    checked: last.box.checked ? 1 : 0,
+    total: 1
+  }
 }
 
 /**

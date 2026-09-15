@@ -15,6 +15,8 @@ import type {
   GmailLoginOptions,
   BulkResult
 } from '@shared/types'
+import type { ImportGroupsResult } from '@shared/group-import'
+import type { DataImportResult } from '@shared/data-import'
 
 interface AppState {
   profiles: ChromeProfile[]
@@ -55,6 +57,9 @@ interface AppState {
   createGroup: (input: CreateGroupInput) => Promise<ProfileGroup>
   updateGroup: (id: string, input: UpdateGroupInput) => Promise<void>
   deleteGroup: (id: string) => Promise<void>
+  importGroups: (raw: string) => Promise<ImportGroupsResult>
+  exportGroups: (groupIds?: string[] | null) => Promise<string>
+  importDataPath: (selectedPath: string) => Promise<DataImportResult>
 
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>
   detectChrome: () => Promise<string>
@@ -228,6 +233,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   deleteGroup: async (id) => {
     await window.api.groups.remove(id)
     await get().refreshAll()
+  },
+
+  importGroups: async (raw) => {
+    const result = await window.api.groups.importJson(raw)
+    await get().refreshAll()
+    return result
+  },
+
+  exportGroups: async (groupIds) => {
+    return window.api.groups.exportJson(groupIds)
+  },
+
+  importDataPath: async (selectedPath) => {
+    const result = await window.api.groups.importDataPath(selectedPath)
+    await get().refreshAll()
+    return result
   },
 
   updateSettings: async (patch) => {

@@ -40,6 +40,13 @@ export const IPC = {
   GROUPS_CREATE: 'groups:create',
   GROUPS_UPDATE: 'groups:update',
   GROUPS_DELETE: 'groups:delete',
+  GROUPS_IMPORT: 'groups:import',
+  GROUPS_EXPORT: 'groups:export',
+  DATA_IMPORT_PREVIEW: 'data:importPreview',
+  DATA_IMPORT: 'data:import',
+  DIALOG_OPEN_JSON: 'dialog:openJson',
+  DIALOG_SAVE_JSON: 'dialog:saveJson',
+  DIALOG_OPEN_DATA_DIR: 'dialog:openDataDir',
 
   // Dashboard & settings
   DASHBOARD_STATS: 'dashboard:stats',

@@ -23,6 +23,11 @@ import {
   stopProfile
 } from './chrome.service'
 import { hasGmailCredentials } from '../../shared/gmail'
+import {
+  buildExportPayload,
+  formatExportJson,
+  parseImportGroupsJson
+} from '../../shared/group-import'
 import type { GmailLoginOptions, ImagePreview } from '../../shared/types'
 import { isAllowedImagePath, safeBasename } from '../utils/path-guard'
 import { sanitizeDashboardStats } from '../utils/profile-sanitize'
@@ -271,6 +276,88 @@ export function registerIpcHandlers(): void {
     db.deleteGroup(id)
     return true
   })
+
+  ipcMain.handle(IPC.GROUPS_IMPORT, (_e, raw: string) => {
+    const payload = parseImportGroupsJson(typeof raw === 'string' ? raw : '')
+    return db.importGroups(payload)
+  })
+
+  ipcMain.handle(IPC.GROUPS_EXPORT, (_e, groupIds?: string[] | null) => {
+    let groups = db.listGroups()
+    if (Array.isArray(groupIds) && groupIds.length > 0) {
+      const want = new Set(groupIds)
+      groups = groups.filter((g) => want.has(g.id))
+    }
+    const profiles = db.listProfiles()
+    return formatExportJson(buildExportPayload(groups, profiles))
+  })
+
+  ipcMain.handle(IPC.DIALOG_OPEN_JSON, async () => {
+    const { dialog, BrowserWindow } = await import('electron')
+    const { readFileSync } = await import('fs')
+    const win = BrowserWindow.getFocusedWindow()
+    const opts = {
+      title: 'Chọn file JSON nhóm / hồ sơ',
+      properties: ['openFile'] as ('openFile')[],
+      filters: [
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts)
+    if (result.canceled || !result.filePaths[0]) return null
+    try {
+      return readFileSync(result.filePaths[0], 'utf8')
+    } catch (error) {
+      throw new Error(
+        error instanceof Error ? `Không đọc được file: ${error.message}` : 'Không đọc được file'
+      )
+    }
+  })
+
+  ipcMain.handle(IPC.DIALOG_SAVE_JSON, async (_e, content: string, defaultName?: string) => {
+    const { dialog, BrowserWindow } = await import('electron')
+    const { writeFileSync } = await import('fs')
+    const win = BrowserWindow.getFocusedWindow()
+    const opts = {
+      title: 'Lưu file JSON',
+      defaultPath: defaultName?.trim() || 'chrome-manager-groups.json',
+      filters: [
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    }
+    const result = win
+      ? await dialog.showSaveDialog(win, opts)
+      : await dialog.showSaveDialog(opts)
+    if (result.canceled || !result.filePath) return null
+    writeFileSync(result.filePath, typeof content === 'string' ? content : '', 'utf8')
+    return result.filePath
+  })
+
+  ipcMain.handle(IPC.DIALOG_OPEN_DATA_DIR, async () => {
+    const { dialog, BrowserWindow } = await import('electron')
+    const win = BrowserWindow.getFocusedWindow()
+    const opts = {
+      title: 'Chọn thư mục chrome-profiles hoặc data',
+      properties: ['openDirectory'] as ('openDirectory')[]
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts)
+    if (result.canceled || !result.filePaths[0]) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle(IPC.DATA_IMPORT_PREVIEW, (_e, selectedPath: string) =>
+    db.previewDataImport(typeof selectedPath === 'string' ? selectedPath : '')
+  )
+
+  ipcMain.handle(IPC.DATA_IMPORT, (_e, selectedPath: string) =>
+    db.importFromDataPath(typeof selectedPath === 'string' ? selectedPath : '')
+  )
 
   ipcMain.handle(IPC.DASHBOARD_STATS, (): DashboardStats => {
     const profiles = db.listProfiles()

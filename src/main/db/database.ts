@@ -1,11 +1,13 @@
 import { app } from 'electron'
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'fs'
 import { join, resolve, sep } from 'path'
@@ -25,6 +27,19 @@ import {
   UpdateProfileInput
 } from '../../shared/types'
 import { normalizeGmail } from '../../shared/gmail'
+import {
+  toCreateProfileInput,
+  type ImportGroupsPayload,
+  type ImportGroupsResult
+} from '../../shared/group-import'
+import {
+  decideImportMode,
+  listProfileFolders,
+  parseStoreSnapshot,
+  resolveDataImportLayout,
+  type DataImportPreview,
+  type DataImportResult
+} from '../../shared/data-import'
 import {
   decryptProfileFromDisk,
   encryptProfileForDisk
@@ -536,6 +551,341 @@ export class Database {
       gmail: null,
       autoLoginGmail: false
     })
+  }
+
+  /**
+   * Nhập nhóm kèm hồ sơ. Luôn tạo id / dataDir mới.
+   * Hồ sơ trùng email Gmail sẽ bị bỏ qua (không hủy cả lần nhập).
+   */
+  importGroups(payload: ImportGroupsPayload): ImportGroupsResult {
+    const skipped: ImportGroupsResult['skipped'] = []
+    const groupIds: string[] = []
+    let profilesCreated = 0
+
+    for (const item of payload.groups) {
+      const group = this.createGroup({
+        name: item.name,
+        color: item.color,
+        description: item.description,
+        restoreLastSession: item.restoreLastSession
+      })
+      groupIds.push(group.id)
+
+      for (const profileItem of item.profiles ?? []) {
+        try {
+          const input = toCreateProfileInput(profileItem, group.id)
+          this.createProfile(input)
+          profilesCreated += 1
+        } catch (error) {
+          skipped.push({
+            groupName: group.name,
+            profileName: profileItem.name,
+            reason: error instanceof Error ? error.message : 'Không thể tạo hồ sơ'
+          })
+        }
+      }
+    }
+
+    return {
+      groupsCreated: groupIds.length,
+      profilesCreated,
+      skipped,
+      groupIds
+    }
+  }
+
+  /** Xem trước khi nhập từ thư mục chrome-profiles / data / file db. */
+  previewDataImport(selectedPath: string): DataImportPreview {
+    const layout = resolveDataImportLayout(selectedPath)
+    const folders = listProfileFolders(layout.profilesDir)
+    const existingIds = new Set(this.data.profiles.map((p) => p.id))
+    const orphanFolderCount = folders.filter((name) => !existingIds.has(name)).length
+    const isLiveDb =
+      Boolean(layout.dbPath) && resolve(layout.dbPath!) === resolve(this.filePath)
+    const sameProfilesRoot = resolve(layout.profilesDir) === resolve(this.getSettings().profilesRoot)
+
+    let snapshot = null as ReturnType<typeof parseStoreSnapshot>
+    if (layout.dbPath && existsSync(layout.dbPath) && !isLiveDb) {
+      try {
+        snapshot = parseStoreSnapshot(readFileSync(layout.dbPath, 'utf8'))
+      } catch {
+        snapshot = null
+      }
+    }
+    if (isLiveDb || (sameProfilesRoot && !snapshot)) {
+      snapshot = null
+    }
+
+    const mode =
+      snapshot != null ? decideImportMode(snapshot, folders.length) : ('folders' as const)
+
+    return {
+      layout,
+      mode,
+      groupCount: snapshot?.groups.length ?? 0,
+      profileCount:
+        snapshot && snapshot.profiles.length > 0
+          ? snapshot.profiles.filter((p) => !existingIds.has(p.id)).length
+          : orphanFolderCount,
+      folderCount: folders.length,
+      orphanFolderCount,
+      dbFound: Boolean(layout.dbPath) && !isLiveDb,
+      groupNames: (snapshot?.groups ?? []).map((g) => g.name).slice(0, 8)
+    }
+  }
+
+  /**
+   * Nhập từ thư mục chrome-profiles (kèm chrome-manager-db.json nếu có).
+   * Ưu tiên nhóm+hồ sơ từ DB → chỉ hồ sơ từ DB → quét thư mục UUID.
+   * Giữ session Chrome bằng cách gắn thư mục sẵn có hoặc copy sang profilesRoot.
+   */
+  importFromDataPath(selectedPath: string): DataImportResult {
+    const layout = resolveDataImportLayout(selectedPath)
+    const destRoot = resolve(this.getSettings().profilesRoot)
+    const sourceRoot = resolve(layout.profilesDir)
+    const folders = listProfileFolders(layout.profilesDir)
+    const existingIds = new Set(this.data.profiles.map((p) => p.id))
+    const isLiveDb =
+      Boolean(layout.dbPath) && resolve(layout.dbPath!) === resolve(this.filePath)
+    const sameProfilesRoot = sourceRoot === destRoot
+
+    let snapshot = null as ReturnType<typeof parseStoreSnapshot>
+    if (layout.dbPath && existsSync(layout.dbPath) && !isLiveDb) {
+      try {
+        const raw = readFileSync(layout.dbPath, 'utf8')
+        snapshot = parseStoreSnapshot(raw)
+        if (snapshot) {
+          snapshot = {
+            groups: snapshot.groups,
+            profiles: snapshot.profiles.map((p) => decryptProfileFromDisk(p))
+          }
+        }
+      } catch {
+        snapshot = null
+      }
+    }
+
+    // Cùng máy / cùng chrome-profiles: chỉ nhận thư mục chưa có trong DB
+    if (isLiveDb || (sameProfilesRoot && !snapshot)) {
+      snapshot = null
+    }
+
+    const mode =
+      snapshot != null
+        ? decideImportMode(snapshot, folders.length)
+        : ('folders' as const)
+
+    const skipped: DataImportResult['skipped'] = []
+    let groupsCreated = 0
+    let profilesCreated = 0
+    let dirsCopied = 0
+    let dirsLinked = 0
+    const groupIdMap = new Map<string, string>()
+
+    if (mode === 'groups' && snapshot) {
+      for (const g of snapshot.groups) {
+        try {
+          const created = this.createGroup({
+            name: g.name,
+            color: g.color,
+            description: g.description,
+            restoreLastSession: g.restoreLastSession
+          })
+          groupIdMap.set(g.id, created.id)
+          groupsCreated += 1
+        } catch (error) {
+          skipped.push({
+            name: g.name,
+            reason: error instanceof Error ? error.message : 'Không tạo được nhóm'
+          })
+        }
+      }
+    }
+
+    const profilesToImport: Array<Partial<ChromeProfile> & { id: string; name: string }> =
+      snapshot && snapshot.profiles.length > 0
+        ? snapshot.profiles
+        : folders
+            .filter((folderName) => !existingIds.has(folderName))
+            .map((folderName, index) => ({
+              id: folderName,
+              name: `Profile ${String(index + 1).padStart(2, '0')}`,
+              notes: '',
+              groupId: null,
+              userAgent: this.getSettings().defaultUserAgent,
+              proxy: { ...DEFAULT_PROXY },
+              dataDir: join(sourceRoot, folderName),
+              homepage: 'chrome://newtab/',
+              tags: [],
+              gmail: null,
+              autoLoginGmail: false
+            }))
+
+    for (const source of profilesToImport) {
+      try {
+        if (existingIds.has(source.id)) {
+          skipped.push({ name: source.name, reason: 'Hồ sơ đã có trong danh sách' })
+          continue
+        }
+
+        const mappedGroupId =
+          source.groupId && groupIdMap.has(source.groupId)
+            ? groupIdMap.get(source.groupId)!
+            : null
+
+        const candidates = [
+          join(sourceRoot, source.id),
+          source.dataDir ? resolve(source.dataDir) : ''
+        ].filter(Boolean)
+
+        const sourceDir =
+          candidates.find((p) => {
+            try {
+              return existsSync(p) && statSync(p).isDirectory()
+            } catch {
+              return false
+            }
+          }) ?? null
+
+        const destDir = join(destRoot, source.id)
+
+        if (!sourceDir) {
+          this.importProfileRecord({
+            id: source.id,
+            name: source.name,
+            notes: source.notes,
+            groupId: mappedGroupId,
+            userAgent: source.userAgent,
+            proxy: source.proxy,
+            homepage: source.homepage,
+            tags: source.tags,
+            gmail: source.gmail ?? null,
+            autoLoginGmail: source.autoLoginGmail,
+            dataDir: destDir,
+            ensureEmptyDir: true
+          })
+          existingIds.add(source.id)
+          profilesCreated += 1
+          skipped.push({
+            name: source.name,
+            reason: 'Không thấy thư mục Chrome — đã tạo hồ sơ trống'
+          })
+          continue
+        }
+
+        const resolvedSource = resolve(sourceDir)
+        const resolvedDest = resolve(destDir)
+
+        if (resolvedSource === resolvedDest || resolvedSource.startsWith(destRoot + sep)) {
+          this.importProfileRecord({
+            id: source.id,
+            name: source.name,
+            notes: source.notes,
+            groupId: mappedGroupId,
+            userAgent: source.userAgent,
+            proxy: source.proxy,
+            homepage: source.homepage,
+            tags: source.tags,
+            gmail: source.gmail ?? null,
+            autoLoginGmail: source.autoLoginGmail,
+            dataDir: resolvedSource.startsWith(destRoot + sep) ? resolvedSource : destDir,
+            ensureEmptyDir: false
+          })
+          dirsLinked += 1
+        } else {
+          mkdirSync(destRoot, { recursive: true })
+          if (existsSync(destDir)) {
+            skipped.push({
+              name: source.name,
+              reason: `Thư mục đích đã tồn tại: ${source.id}`
+            })
+            continue
+          }
+          cpSync(sourceDir, destDir, { recursive: true })
+          this.importProfileRecord({
+            id: source.id,
+            name: source.name,
+            notes: source.notes,
+            groupId: mappedGroupId,
+            userAgent: source.userAgent,
+            proxy: source.proxy,
+            homepage: source.homepage,
+            tags: source.tags,
+            gmail: source.gmail ?? null,
+            autoLoginGmail: source.autoLoginGmail,
+            dataDir: destDir,
+            ensureEmptyDir: false
+          })
+          dirsCopied += 1
+        }
+
+        existingIds.add(source.id)
+        profilesCreated += 1
+      } catch (error) {
+        skipped.push({
+          name: source.name || source.id,
+          reason: error instanceof Error ? error.message : 'Không nhập được hồ sơ'
+        })
+      }
+    }
+
+    this.persistImmediate()
+
+    return {
+      mode,
+      groupsCreated,
+      profilesCreated,
+      dirsCopied,
+      dirsLinked,
+      skipped
+    }
+  }
+
+  /** Ghi hồ sơ đã có dataDir (không tạo thư mục mới trừ khi yêu cầu). */
+  private importProfileRecord(input: {
+    id: string
+    name: string
+    notes?: string
+    groupId?: string | null
+    userAgent?: string
+    proxy?: ChromeProfile['proxy']
+    homepage?: string
+    tags?: string[]
+    gmail?: ChromeProfile['gmail']
+    autoLoginGmail?: boolean
+    dataDir: string
+    ensureEmptyDir: boolean
+  }): ChromeProfile {
+    if (this.data.profiles.some((p) => p.id === input.id)) {
+      throw new Error(`Hồ sơ id ${input.id} đã tồn tại`)
+    }
+    const now = new Date().toISOString()
+    const settings = this.getSettings()
+    if (input.ensureEmptyDir && !existsSync(input.dataDir)) {
+      mkdirSync(input.dataDir, { recursive: true })
+    }
+    const gmail = normalizeGmail(input.gmail)
+    this.assertGmailUnique(gmail, input.id)
+
+    const profile: ChromeProfile = {
+      id: input.id,
+      name: (input.name || 'Profile').trim(),
+      notes: input.notes?.trim() ?? '',
+      groupId: input.groupId ?? null,
+      userAgent: input.userAgent?.trim() || settings.defaultUserAgent,
+      proxy: { ...DEFAULT_PROXY, ...(input.proxy ?? {}) },
+      dataDir: input.dataDir,
+      homepage: input.homepage?.trim() || 'chrome://newtab/',
+      tags: input.tags ?? [],
+      gmail,
+      autoLoginGmail: Boolean(input.autoLoginGmail),
+      status: 'idle',
+      lastLaunchedAt: null,
+      createdAt: now,
+      updatedAt: now
+    }
+    this.data.profiles.push(profile)
+    return this.normalizeProfile(profile)
   }
 }
 

@@ -19,6 +19,8 @@ import type {
   UpdateProfileInput,
   WindowBounds
 } from '@shared/types'
+import type { ImportGroupsResult } from '@shared/group-import'
+import type { DataImportPreview, DataImportResult } from '@shared/data-import'
 
 export interface AppApi {
   profiles: {
@@ -60,6 +62,13 @@ export interface AppApi {
     create: (input: CreateGroupInput) => Promise<ProfileGroup>
     update: (id: string, input: UpdateGroupInput) => Promise<ProfileGroup>
     remove: (id: string) => Promise<boolean>
+    importJson: (raw: string) => Promise<ImportGroupsResult>
+    exportJson: (groupIds?: string[] | null) => Promise<string>
+    pickImportFile: () => Promise<string | null>
+    saveExportFile: (content: string, defaultName?: string) => Promise<string | null>
+    pickDataPath: () => Promise<string | null>
+    previewDataImport: (selectedPath: string) => Promise<DataImportPreview>
+    importDataPath: (selectedPath: string) => Promise<DataImportResult>
   }
   dashboard: {
     stats: () => Promise<DashboardStats>

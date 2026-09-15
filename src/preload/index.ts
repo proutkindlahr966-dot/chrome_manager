@@ -21,6 +21,8 @@ import type {
   UpdateProfileInput,
   WindowBounds
 } from '../shared/types'
+import type { ImportGroupsResult } from '../shared/group-import'
+import type { DataImportPreview, DataImportResult } from '../shared/data-import'
 
 const api = {
   profiles: {
@@ -93,7 +95,19 @@ const api = {
       ipcRenderer.invoke(IPC.GROUPS_CREATE, input),
     update: (id: string, input: UpdateGroupInput): Promise<ProfileGroup> =>
       ipcRenderer.invoke(IPC.GROUPS_UPDATE, id, input),
-    remove: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.GROUPS_DELETE, id)
+    remove: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC.GROUPS_DELETE, id),
+    importJson: (raw: string): Promise<ImportGroupsResult> =>
+      ipcRenderer.invoke(IPC.GROUPS_IMPORT, raw),
+    exportJson: (groupIds?: string[] | null): Promise<string> =>
+      ipcRenderer.invoke(IPC.GROUPS_EXPORT, groupIds),
+    pickImportFile: (): Promise<string | null> => ipcRenderer.invoke(IPC.DIALOG_OPEN_JSON),
+    saveExportFile: (content: string, defaultName?: string): Promise<string | null> =>
+      ipcRenderer.invoke(IPC.DIALOG_SAVE_JSON, content, defaultName),
+    pickDataPath: (): Promise<string | null> => ipcRenderer.invoke(IPC.DIALOG_OPEN_DATA_DIR),
+    previewDataImport: (selectedPath: string): Promise<DataImportPreview> =>
+      ipcRenderer.invoke(IPC.DATA_IMPORT_PREVIEW, selectedPath),
+    importDataPath: (selectedPath: string): Promise<DataImportResult> =>
+      ipcRenderer.invoke(IPC.DATA_IMPORT, selectedPath)
   },
   dashboard: {
     stats: (): Promise<DashboardStats> => ipcRenderer.invoke(IPC.DASHBOARD_STATS)

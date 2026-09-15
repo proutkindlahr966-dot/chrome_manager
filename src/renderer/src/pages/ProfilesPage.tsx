@@ -7,7 +7,8 @@ import {
   Plus,
   Search,
   Square,
-  Trash2
+  Trash2,
+  Upload
 } from 'lucide-react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -47,6 +48,8 @@ export function ProfilesPage(): JSX.Element {
   const resetProfile = useAppStore((s) => s.resetProfile)
   const bulkUpdateProfiles = useAppStore((s) => s.bulkUpdateProfiles)
   const updateGroup = useAppStore((s) => s.updateGroup)
+  const importDataPath = useAppStore((s) => s.importDataPath)
+  const [importingData, setImportingData] = useState(false)
 
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<ChromeProfile | null>(null)
@@ -284,10 +287,45 @@ export function ProfilesPage(): JSX.Element {
       toast({ tone: 'success', title: `Đã xóa sạch "${profile.name}"` })
     } catch (error) {
       toast({
-        tone: 'danger',
+        tone: 'error',
         title: 'Không thể xóa sạch hồ sơ',
         description: error instanceof Error ? error.message : 'Lỗi không xác định'
       })
+    }
+  }
+
+  async function onImportDataFolder(): Promise<void> {
+    if (importingData) return
+    try {
+      const selected = await window.api.groups.pickDataPath()
+      if (!selected) return
+      const preview = await window.api.groups.previewDataImport(selected)
+      const ok = await askConfirm({
+        title: 'Nhập từ thư mục chrome-profiles?',
+        description:
+          preview.mode === 'groups'
+            ? `Sẽ nhập ~${preview.groupCount} nhóm và ~${preview.profileCount} hồ sơ (giữ session Chrome nếu có thư mục).`
+            : preview.mode === 'profiles'
+              ? `Không có nhóm hợp lệ — sẽ nhập ~${preview.profileCount} hồ sơ.`
+              : `Sẽ gắn ~${preview.profileCount} thư mục Chrome thành hồ sơ (chưa có trong danh sách).`,
+        confirmLabel: 'Nhập'
+      })
+      if (!ok) return
+      setImportingData(true)
+      const result = await importDataPath(selected)
+      toast({
+        tone: result.profilesCreated > 0 || result.groupsCreated > 0 ? 'success' : 'warning',
+        title: 'Đã nhập dữ liệu',
+        description: `Nhóm ${result.groupsCreated}, hồ sơ ${result.profilesCreated}, gắn ${result.dirsLinked}, copy ${result.dirsCopied}.`
+      })
+    } catch (error) {
+      toast({
+        tone: 'error',
+        title: 'Không thể nhập thư mục',
+        description: error instanceof Error ? error.message : undefined
+      })
+    } finally {
+      setImportingData(false)
     }
   }
 
@@ -297,10 +335,21 @@ export function ProfilesPage(): JSX.Element {
         title="Hồ sơ Chrome"
         description="Tạo, nhóm, khởi chạy và theo dõi hàng loạt các profile trình duyệt."
         actions={
-          <button type="button" className="btn-primary" onClick={openCreate}>
-            <Plus size={16} />
-            Tạo hồ sơ
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={importingData}
+              onClick={() => void onImportDataFolder()}
+            >
+              <Upload size={16} />
+              {importingData ? 'Đang nhập...' : 'Nhập thư mục'}
+            </button>
+            <button type="button" className="btn-primary" onClick={openCreate}>
+              <Plus size={16} />
+              Tạo hồ sơ
+            </button>
+          </div>
         }
       />
 

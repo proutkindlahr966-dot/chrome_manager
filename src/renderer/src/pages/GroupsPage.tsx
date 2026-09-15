@@ -1,5 +1,5 @@
 import { FormEvent, useMemo, useState } from 'react'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Download, Pencil, Plus, Trash2, Upload } from 'lucide-react'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Modal } from '@/components/ui/Modal'
@@ -8,11 +8,35 @@ import { useAppStore } from '@/stores/app-store'
 import { askConfirm, toast } from '@/stores/ui-store'
 import { GROUP_COLORS, type ProfileGroup } from '@shared/types'
 import {
+  parseImportGroupsJson,
+  summarizeImportPayload
+} from '@shared/group-import'
+import type { DataImportPreview } from '@shared/data-import'
+import {
   DEFAULT_PROFILE_PREFIX,
   formatDate,
   formatProfileName,
   suggestNextIndex
 } from '@/lib/utils'
+
+const IMPORT_EXAMPLE = `{
+  "version": 1,
+  "groups": [
+    {
+      "name": "Dự án A",
+      "color": "#0F766E",
+      "description": "",
+      "restoreLastSession": true,
+      "profiles": [
+        {
+          "name": "Dự án A 01",
+          "proxy": "host:port:user:pass",
+          "gmail": "mail@gmail.com|password|2fasecret"
+        }
+      ]
+    }
+  ]
+}`
 
 export function GroupsPage(): JSX.Element {
   const groups = useAppStore((s) => s.groups)
@@ -21,6 +45,9 @@ export function GroupsPage(): JSX.Element {
   const createProfiles = useAppStore((s) => s.createProfiles)
   const updateGroup = useAppStore((s) => s.updateGroup)
   const deleteGroup = useAppStore((s) => s.deleteGroup)
+  const importGroups = useAppStore((s) => s.importGroups)
+  const exportGroups = useAppStore((s) => s.exportGroups)
+  const importDataPath = useAppStore((s) => s.importDataPath)
   const settings = useAppStore((s) => s.settings)
 
   const [open, setOpen] = useState(false)
@@ -31,6 +58,15 @@ export function GroupsPage(): JSX.Element {
   const [color, setColor] = useState<string>(GROUP_COLORS[0])
   const [restoreLastSession, setRestoreLastSession] = useState(true)
   const [profileCount, setProfileCount] = useState(0)
+
+  const [importOpen, setImportOpen] = useState(false)
+  const [importRaw, setImportRaw] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [dataPath, setDataPath] = useState('')
+  const [dataPreview, setDataPreview] = useState<DataImportPreview | null>(null)
+  const [dataPreviewError, setDataPreviewError] = useState<string | null>(null)
+  const [importTab, setImportTab] = useState<'folder' | 'json'>('folder')
 
   const profileCountByGroup = useMemo(() => {
     const map = new Map<string, number>()
@@ -57,6 +93,19 @@ export function GroupsPage(): JSX.Element {
     return samples
   }, [safeProfileCount, namePrefix, namePad])
 
+  const importPreview = useMemo(() => {
+    const text = importRaw.trim()
+    if (!text) return null
+    try {
+      return { ok: true as const, ...summarizeImportPayload(parseImportGroupsJson(text)) }
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: error instanceof Error ? error.message : 'JSON không hợp lệ'
+      }
+    }
+  }, [importRaw])
+
   function openCreate(): void {
     setEditing(null)
     setName('')
@@ -75,6 +124,149 @@ export function GroupsPage(): JSX.Element {
     setRestoreLastSession(group.restoreLastSession !== false)
     setProfileCount(0)
     setOpen(true)
+  }
+
+  function openImport(): void {
+    setImportRaw('')
+    setDataPath('')
+    setDataPreview(null)
+    setDataPreviewError(null)
+    setImportTab('folder')
+    setImportOpen(true)
+  }
+
+  async function onPickImportFile(): Promise<void> {
+    try {
+      const content = await window.api.groups.pickImportFile()
+      if (content == null) return
+      setImportRaw(content)
+      setImportTab('json')
+    } catch (error) {
+      toast({
+        tone: 'error',
+        title: 'Không đọc được file',
+        description: error instanceof Error ? error.message : undefined
+      })
+    }
+  }
+
+  async function onPickDataFolder(): Promise<void> {
+    try {
+      const selected = await window.api.groups.pickDataPath()
+      if (!selected) return
+      setDataPath(selected)
+      setDataPreviewError(null)
+      const preview = await window.api.groups.previewDataImport(selected)
+      setDataPreview(preview)
+      setImportTab('folder')
+    } catch (error) {
+      setDataPreview(null)
+      setDataPreviewError(error instanceof Error ? error.message : 'Không đọc được thư mục')
+    }
+  }
+
+  async function onImportDataFolder(): Promise<void> {
+    if (importing || !dataPath || !dataPreview) return
+    setImporting(true)
+    try {
+      const result = await importDataPath(dataPath)
+      const modeLabel =
+        result.mode === 'groups'
+          ? 'nhóm + hồ sơ'
+          : result.mode === 'profiles'
+            ? 'hồ sơ (kèm metadata)'
+            : 'thư mục Chrome'
+      const skipNote =
+        result.skipped.length > 0 ? ` Bỏ qua/cảnh báo: ${result.skipped.length}.` : ''
+      toast({
+        tone: result.profilesCreated > 0 || result.groupsCreated > 0 ? 'success' : 'warning',
+        title: `Đã nhập ${modeLabel}`,
+        description: `Nhóm ${result.groupsCreated}, hồ sơ ${result.profilesCreated}, gắn sẵn ${result.dirsLinked}, copy ${result.dirsCopied}.${skipNote}`
+      })
+      setImportOpen(false)
+    } catch (error) {
+      toast({
+        tone: 'error',
+        title: 'Không thể nhập thư mục',
+        description: error instanceof Error ? error.message : undefined
+      })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  async function onImportSubmit(e: FormEvent): Promise<void> {
+    e.preventDefault()
+    if (importing || !importPreview?.ok) return
+    setImporting(true)
+    try {
+      const result = await importGroups(importRaw)
+      const skipNote =
+        result.skipped.length > 0
+          ? ` Bỏ qua ${result.skipped.length} hồ sơ (thường do trùng email).`
+          : ''
+      toast({
+        tone: result.skipped.length > 0 ? 'warning' : 'success',
+        title: 'Đã nhập nhóm',
+        description: `Tạo ${result.groupsCreated} nhóm, ${result.profilesCreated} hồ sơ.${skipNote}`
+      })
+      setImportOpen(false)
+      setImportRaw('')
+    } catch (error) {
+      toast({
+        tone: 'error',
+        title: 'Không thể nhập nhóm',
+        description: error instanceof Error ? error.message : undefined
+      })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  async function onExportAll(): Promise<void> {
+    if (exporting || groups.length === 0) return
+    setExporting(true)
+    try {
+      const json = await exportGroups()
+      const path = await window.api.groups.saveExportFile(json, 'chrome-manager-groups.json')
+      if (!path) return
+      toast({
+        tone: 'success',
+        title: 'Đã xuất nhóm',
+        description: path
+      })
+    } catch (error) {
+      toast({
+        tone: 'error',
+        title: 'Không thể xuất nhóm',
+        description: error instanceof Error ? error.message : undefined
+      })
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  async function onExportOne(group: ProfileGroup): Promise<void> {
+    try {
+      const json = await exportGroups([group.id])
+      const safeName = group.name.replace(/[<>:"/\\|?*]+/g, '_').trim() || 'group'
+      const path = await window.api.groups.saveExportFile(
+        json,
+        `chrome-manager-${safeName}.json`
+      )
+      if (!path) return
+      toast({
+        tone: 'success',
+        title: 'Đã xuất nhóm',
+        description: path
+      })
+    } catch (error) {
+      toast({
+        tone: 'error',
+        title: 'Không thể xuất nhóm',
+        description: error instanceof Error ? error.message : undefined
+      })
+    }
   }
 
   async function onSubmit(e: FormEvent): Promise<void> {
@@ -132,10 +324,25 @@ export function GroupsPage(): JSX.Element {
         title="Nhóm hồ sơ"
         description="Phân loại hồ sơ theo dự án, khách hàng hoặc mục đích vận hành."
         actions={
-          <button type="button" className="btn-primary" onClick={openCreate}>
-            <Plus size={16} />
-            Tạo nhóm
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void onExportAll()}
+              disabled={groups.length === 0 || exporting}
+            >
+              <Download size={16} />
+              {exporting ? 'Đang xuất...' : 'Xuất JSON'}
+            </button>
+            <button type="button" className="btn-secondary" onClick={openImport}>
+              <Upload size={16} />
+              Nhập nhóm
+            </button>
+            <button type="button" className="btn-primary" onClick={openCreate}>
+              <Plus size={16} />
+              Tạo nhóm
+            </button>
+          </div>
         }
       />
 
@@ -144,9 +351,15 @@ export function GroupsPage(): JSX.Element {
           title="Chưa có nhóm"
           description="Tạo nhóm để tổ chức hồ sơ dễ tìm kiếm và thao tác hàng loạt hơn."
           action={
-            <button type="button" className="btn-primary" onClick={openCreate}>
-              Tạo nhóm đầu tiên
-            </button>
+            <div className="flex flex-wrap justify-center gap-2">
+              <button type="button" className="btn-secondary" onClick={openImport}>
+                <Upload size={16} />
+                Nhập nhóm
+              </button>
+              <button type="button" className="btn-primary" onClick={openCreate}>
+                Tạo nhóm đầu tiên
+              </button>
+            </div>
           }
         />
       ) : (
@@ -169,6 +382,15 @@ export function GroupsPage(): JSX.Element {
                     </div>
                   </div>
                   <div className="flex gap-1">
+                    <button
+                      type="button"
+                      className="btn-ghost btn-icon"
+                      aria-label="Xuất nhóm"
+                      title="Xuất nhóm (JSON)"
+                      onClick={() => void onExportOne(group)}
+                    >
+                      <Download size={15} />
+                    </button>
                     <button
                       type="button"
                       className="btn-ghost btn-icon"
@@ -320,6 +542,145 @@ export function GroupsPage(): JSX.Element {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} title="Nhập nhóm / hồ sơ">
+        <div className="space-y-4">
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={importTab === 'folder' ? 'btn-primary' : 'btn-secondary'}
+              onClick={() => setImportTab('folder')}
+            >
+              Thư mục chrome-profiles
+            </button>
+            <button
+              type="button"
+              className={importTab === 'json' ? 'btn-primary' : 'btn-secondary'}
+              onClick={() => setImportTab('json')}
+            >
+              JSON
+            </button>
+          </div>
+
+          {importTab === 'folder' ? (
+            <div className="space-y-4">
+              <p className="text-sm text-ink-muted">
+                Chọn thư mục <span className="font-medium text-ink-soft">chrome-profiles</span> hoặc{' '}
+                <span className="font-medium text-ink-soft">data</span> (có thể kèm{' '}
+                <span className="font-medium text-ink-soft">chrome-manager-db.json</span> cạnh đó). Có
+                DB thì nhập nhóm + hồ sơ (giữ session); không có nhóm thì nhập hồ sơ; chỉ còn thư mục
+                UUID thì gắn thành hồ sơ.
+              </p>
+              <button type="button" className="btn-secondary" onClick={() => void onPickDataFolder()}>
+                Chọn thư mục…
+              </button>
+              {dataPath && (
+                <div className="rounded-xl border border-line bg-surface-muted/40 p-3 text-xs text-ink-muted break-all">
+                  {dataPath}
+                </div>
+              )}
+              {dataPreviewError && (
+                <div className="rounded-xl border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger">
+                  {dataPreviewError}
+                </div>
+              )}
+              {dataPreview && (
+                <div className="rounded-xl border border-line bg-surface-muted/40 p-3 text-sm text-ink-soft">
+                  Chế độ:{' '}
+                  <span className="font-medium text-ink">
+                    {dataPreview.mode === 'groups'
+                      ? 'Nhóm + hồ sơ'
+                      : dataPreview.mode === 'profiles'
+                        ? 'Chỉ hồ sơ (có metadata)'
+                        : 'Thư mục Chrome → hồ sơ'}
+                  </span>
+                  <div className="mt-1 text-xs text-ink-muted">
+                    DB: {dataPreview.dbFound ? 'có' : 'không'} · Nhóm mới ~{dataPreview.groupCount} ·
+                    Hồ sơ mới ~{dataPreview.profileCount} · Thư mục {dataPreview.folderCount} (mồ côi{' '}
+                    {dataPreview.orphanFolderCount})
+                  </div>
+                  {dataPreview.groupNames.length > 0 && (
+                    <div className="mt-1 text-xs text-ink-muted">
+                      {dataPreview.groupNames.join(' · ')}
+                      {dataPreview.groupCount > dataPreview.groupNames.length ? ' …' : ''}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button type="button" className="btn-secondary" onClick={() => setImportOpen(false)}>
+                  Hủy
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={importing || !dataPreview || dataPreview.profileCount + dataPreview.groupCount === 0}
+                  onClick={() => void onImportDataFolder()}
+                >
+                  {importing ? 'Đang nhập...' : 'Nhập từ thư mục'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <form className="space-y-4" onSubmit={(e) => void onImportSubmit(e)}>
+              <p className="text-sm text-ink-muted">
+                Dán JSON nhóm (không mang session Chrome). Muốn giữ session hãy dùng tab thư mục.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="btn-secondary" onClick={() => void onPickImportFile()}>
+                  Chọn file JSON…
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => setImportRaw(IMPORT_EXAMPLE)}
+                >
+                  Chèn ví dụ
+                </button>
+              </div>
+              <div>
+                <label className="label">Nội dung JSON</label>
+                <textarea
+                  className="input min-h-[220px] font-mono text-xs"
+                  value={importRaw}
+                  onChange={(e) => setImportRaw(e.target.value)}
+                  placeholder={IMPORT_EXAMPLE}
+                  spellCheck={false}
+                />
+              </div>
+              {importPreview?.ok === true && (
+                <div className="rounded-xl border border-line bg-surface-muted/40 p-3 text-sm text-ink-soft">
+                  Sẽ tạo <span className="font-medium text-ink">{importPreview.groupCount}</span> nhóm,{' '}
+                  <span className="font-medium text-ink">{importPreview.profileCount}</span> hồ sơ
+                  {importPreview.names.length > 0 && (
+                    <div className="mt-1 text-xs text-ink-muted">
+                      {importPreview.names.slice(0, 5).join(' · ')}
+                      {importPreview.names.length > 5 ? ' …' : ''}
+                    </div>
+                  )}
+                </div>
+              )}
+              {importPreview?.ok === false && (
+                <div className="rounded-xl border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger">
+                  {importPreview.error}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button type="button" className="btn-secondary" onClick={() => setImportOpen(false)}>
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={importing || !importPreview?.ok}
+                >
+                  {importing ? 'Đang nhập...' : 'Nhập JSON'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
       </Modal>
     </div>
   )
