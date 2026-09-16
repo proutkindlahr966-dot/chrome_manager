@@ -1,5 +1,3 @@
-import { basename, dirname, join, resolve } from 'path'
-import { existsSync, readdirSync, statSync } from 'fs'
 import type { ChromeProfile, ProfileGroup } from './types'
 
 export type DataImportMode = 'groups' | 'profiles' | 'folders'
@@ -8,6 +6,8 @@ export interface DataImportLayout {
   root: string
   profilesDir: string
   dbPath: string | null
+  /** Chọn 1 thư mục UUID (vd. E:\0dde16d0-…) — không quét cả ổ đĩa. */
+  onlyFolderNames?: string[]
 }
 
 export interface DataImportPreview {
@@ -17,16 +17,27 @@ export interface DataImportPreview {
   profileCount: number
   folderCount: number
   orphanFolderCount: number
+  healCount: number
+  alreadyPresentCount: number
+  alreadyPresentNames: string[]
   dbFound: boolean
   groupNames: string[]
+}
+
+export interface DataImportOptions {
+  /** Gán hồ sơ mới / chưa nhóm vào nhóm đang chọn trên UI. */
+  groupId?: string | null
 }
 
 export interface DataImportResult {
   mode: DataImportMode
   groupsCreated: number
   profilesCreated: number
+  profilesHealed: number
   dirsCopied: number
   dirsLinked: number
+  alreadyPresent: number
+  readyNames: string[]
   skipped: Array<{ name: string; reason: string }>
 }
 
@@ -42,115 +53,45 @@ export function looksLikeUuid(name: string): boolean {
   return UUID_RE.test(name.trim())
 }
 
-/** Thư mục Chrome user-data (có Default / Local State / Preferences). */
-export function looksLikeChromeUserDataDir(dir: string): boolean {
-  try {
-    if (!statSync(dir).isDirectory()) return false
-  } catch {
-    return false
-  }
-  return (
-    existsSync(join(dir, 'Default')) ||
-    existsSync(join(dir, 'Local State')) ||
-    existsSync(join(dir, 'Preferences'))
-  )
-}
-
-function findDbBeside(profilesDir: string): string | null {
-  const candidates = [
-    join(profilesDir, 'chrome-manager-db.json'),
-    join(dirname(profilesDir), 'chrome-manager-db.json'),
-    join(dirname(profilesDir), 'data', 'chrome-manager-db.json'),
-    join(profilesDir, '..', 'chrome-manager-db.json')
-  ]
-  for (const p of candidates) {
-    const abs = resolve(p)
-    if (existsSync(abs)) return abs
-  }
-  return null
-}
-
-/**
- * Nhận diện layout từ đường dẫn người dùng chọn:
- * - thư mục `chrome-profiles` (UUID con)
- * - thư mục `data` (có chrome-profiles)
- * - thư mục gốc chứa cả db + chrome-profiles
- * - file `chrome-manager-db.json`
- */
-export function resolveDataImportLayout(selectedPath: string): DataImportLayout {
-  const root = resolve(selectedPath.trim())
-  if (!existsSync(root)) throw new Error('Đường dẫn không tồn tại')
-
-  let isFile = false
-  try {
-    isFile = statSync(root).isFile()
-  } catch {
-    throw new Error('Không đọc được đường dẫn')
-  }
-
-  if (isFile) {
-    if (!root.toLowerCase().endsWith('.json')) {
-      throw new Error('Chỉ hỗ trợ file JSON hoặc thư mục chrome-profiles')
-    }
-    const dir = dirname(root)
-    const siblingProfiles = join(dir, 'chrome-profiles')
-    const nestedProfiles = join(dir, 'data', 'chrome-profiles')
-    const profilesDir = existsSync(siblingProfiles)
-      ? siblingProfiles
-      : existsSync(nestedProfiles)
-        ? nestedProfiles
-        : dir
-    return { root: dir, profilesDir, dbPath: root }
-  }
-
-  const name = basename(root).toLowerCase()
-
-  // Chọn đúng chrome-profiles
-  if (name === 'chrome-profiles') {
+export function summarizeDataImport(result: DataImportResult): {
+  tone: 'success' | 'warning'
+  title: string
+  description: string
+} {
+  const names = result.readyNames.slice(0, 4).join(', ')
+  const changed =
+    result.groupsCreated +
+    result.profilesCreated +
+    result.profilesHealed +
+    result.dirsCopied +
+    result.dirsLinked +
+    result.alreadyPresent
+  if (result.dirsLinked > 0 && result.dirsCopied === 0 && result.alreadyPresent === 0) {
     return {
-      root: dirname(root),
-      profilesDir: root,
-      dbPath: findDbBeside(root)
+      tone: 'success',
+      title: 'Đã gắn hồ sơ',
+      description: `${names || 'Hồ sơ'} dùng đúng thư mục Chrome gốc — Gmail và tab được giữ nguyên. Đóng Chrome đang mở thư mục đó trước khi mở từ app.`
     }
   }
-
-  // Chọn data/ hoặc thư mục có chrome-profiles/
-  const nested = join(root, 'chrome-profiles')
-  if (existsSync(nested) && statSync(nested).isDirectory()) {
-    const dbInRoot = join(root, 'chrome-manager-db.json')
+  if (
+    result.alreadyPresent > 0 &&
+    result.profilesCreated === 0 &&
+    result.dirsCopied === 0 &&
+    result.profilesHealed === 0
+  ) {
     return {
-      root,
-      profilesDir: nested,
-      dbPath: existsSync(dbInRoot) ? dbInRoot : findDbBeside(nested)
+      tone: 'success',
+      title: 'Hồ sơ đã có sẵn',
+      description: `${names || 'Hồ sơ này'} đã nằm trong danh sách (thường ở bộ lọc Chưa nhóm). Session Chrome được giữ nguyên — không tạo bản mới.`
     }
   }
-
-  // Thư mục chứa các UUID trực tiếp
-  const kids = readdirSync(root, { withFileTypes: true })
-  const uuidDirs = kids.filter((d) => d.isDirectory() && looksLikeUuid(d.name))
-  if (uuidDirs.length > 0) {
-    return {
-      root,
-      profilesDir: root,
-      dbPath: findDbBeside(root)
-    }
+  const skip =
+    result.skipped.length > 0 ? ` ${result.skipped[0].name}: ${result.skipped[0].reason}` : ''
+  return {
+    tone: changed > 0 ? 'success' : 'warning',
+    title: 'Đã nhập dữ liệu',
+    description: `Nhóm ${result.groupsCreated}, hồ sơ ${result.profilesCreated}, chữa ${result.profilesHealed}, gắn ${result.dirsLinked}, copy ${result.dirsCopied}, có sẵn ${result.alreadyPresent}.${skip}`
   }
-
-  throw new Error(
-    'Không tìm thấy thư mục hồ sơ Chrome (chrome-profiles hoặc các thư mục UUID)'
-  )
-}
-
-export function listProfileFolders(profilesDir: string): string[] {
-  if (!existsSync(profilesDir)) return []
-  return readdirSync(profilesDir, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && d.name !== '.git')
-    .map((d) => d.name)
-    .filter((name) => {
-      const full = join(profilesDir, name)
-      return looksLikeUuid(name) || looksLikeChromeUserDataDir(full)
-    })
-    .sort((a, b) => a.localeCompare(b))
 }
 
 export function parseStoreSnapshot(raw: string): StoreSnapshot | null {

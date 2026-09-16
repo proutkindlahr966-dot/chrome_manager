@@ -12,9 +12,10 @@ import { join } from 'path'
 import { BrowserWindow, screen } from 'electron'
 import { getDb } from '../db/database'
 import { IPC } from '../../shared/ipc'
-import { LaunchResult, BulkResult, LaunchOptions, WindowBounds } from '../../shared/types'
+import { LaunchResult, BulkResult, LaunchOptions, WindowBounds, DEFAULT_USER_AGENT } from '../../shared/types'
 import { createAsyncLock, createKeyedAsyncLock } from '../utils/async-lock'
 import { toStatusPatch } from '../utils/profile-sanitize'
+import { chromeUserDataLooksPopulated } from '../utils/data-import-fs'
 import {
   resolveChromeProxyServer,
   stopAllProxyRelays,
@@ -112,10 +113,11 @@ function clearChromeSessionFiles(dataDir: string): void {
 
 /**
  * Ép Preferences trước khi mở Chrome:
- * - restoreLastSession=true  → Continue where you left off
- * - restoreLastSession=false → New Tab (chrome://newtab/), xóa session cũ
+ * - restoreLastSession=true  → không đụng file session/cookie (giữ Gmail + tab)
+ * - restoreLastSession=false → New Tab, xóa session cũ
  */
 function prepareChromeSessionPrefs(dataDir: string, restoreLastSession: boolean): void {
+  if (restoreLastSession) return
   try {
     mkdirSync(dataDir, { recursive: true })
     const defaultDir = join(dataDir, 'Default')
@@ -127,18 +129,15 @@ function prepareChromeSessionPrefs(dataDir: string, restoreLastSession: boolean)
       try {
         prefs = JSON.parse(readFileSync(prefsPath, 'utf-8')) as Record<string, unknown>
       } catch {
-        prefs = {}
+        return
       }
     }
 
-    if (!restoreLastSession) {
-      clearChromeSessionFiles(dataDir)
-    }
+    clearChromeSessionFiles(dataDir)
 
     const session = {
       ...((prefs.session as Record<string, unknown> | undefined) ?? {}),
-      // 5 = Open the New Tab page
-      restore_on_startup: restoreLastSession ? 1 : 5,
+      restore_on_startup: 5,
       startup_urls: []
     }
 
@@ -466,10 +465,19 @@ async function launchProfileUnlocked(
       `--remote-debugging-port=${debugPort}`,
       `--remote-allow-origins=*`,
       `--no-first-run`,
-      `--no-default-browser-check`,
-      `--disable-sync`,
-      `--user-agent=${profile.userAgent}`
+      `--no-default-browser-check`
     ]
+    // Hồ sơ đã có cookie/tab: không ép UA mặc định (Google sẽ đăng xuất).
+    const defaultUa = getDb().getSettings().defaultUserAgent || DEFAULT_USER_AGENT
+    const keepNativeUa =
+      chromeUserDataLooksPopulated(profile.dataDir) &&
+      (!profile.userAgent || profile.userAgent === defaultUa)
+    if (profile.userAgent && !keepNativeUa) {
+      args.push(`--user-agent=${profile.userAgent}`)
+    }
+    if (!chromeUserDataLooksPopulated(profile.dataDir)) {
+      args.push('--disable-sync')
+    }
 
     if (options?.windowBounds) {
       const b = options.windowBounds

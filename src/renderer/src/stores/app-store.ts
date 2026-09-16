@@ -59,7 +59,10 @@ interface AppState {
   deleteGroup: (id: string) => Promise<void>
   importGroups: (raw: string) => Promise<ImportGroupsResult>
   exportGroups: (groupIds?: string[] | null) => Promise<string>
-  importDataPath: (selectedPath: string) => Promise<DataImportResult>
+  importDataPath: (
+    selectedPath: string,
+    options?: { groupId?: string | null }
+  ) => Promise<DataImportResult>
 
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>
   detectChrome: () => Promise<string>
@@ -245,8 +248,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     return window.api.groups.exportJson(groupIds)
   },
 
-  importDataPath: async (selectedPath) => {
-    const result = await window.api.groups.importDataPath(selectedPath)
+  importDataPath: async (selectedPath, options) => {
+    const result = await window.api.groups.importDataPath(selectedPath, options)
     await get().refreshAll()
     return result
   },

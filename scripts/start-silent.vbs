@@ -15,9 +15,10 @@ If Not fso.FolderExists(folder & "\node_modules") Then
 End If
 
 ' Dam bao co ban build moi nhat truoc khi mo app chinh
-rc = sh.Run("cmd /c npm run build", 0, True)
+logFile = folder & "\scripts\last-build.log"
+rc = sh.Run("cmd /c npm run build > """ & logFile & """ 2>&1", 0, True)
 If rc <> 0 Then
-  MsgBox "Build that bai. Mo bang che do dev.", vbExclamation, "Chrome Manager"
+  MsgBox "Build that bai. Chi tiet: scripts\last-build.log" & vbCrLf & "Se mo bang che do dev.", vbExclamation, "Chrome Manager"
   sh.Run "cmd /c npm run dev", 0, False
   WScript.Quit 0
 End If

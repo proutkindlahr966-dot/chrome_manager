@@ -1,10 +1,11 @@
 import { app } from 'electron'
+import { spawnSync } from 'child_process'
 import {
-  copyFileSync,
   cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -34,17 +35,29 @@ import {
 } from '../../shared/group-import'
 import {
   decideImportMode,
-  listProfileFolders,
+  looksLikeUuid,
   parseStoreSnapshot,
-  resolveDataImportLayout,
+  type DataImportOptions,
   type DataImportPreview,
   type DataImportResult
 } from '../../shared/data-import'
 import {
+  chromeSessionFingerprint,
+  chromeUserDataLooksPopulated,
+  listFoldersForLayout,
+  listProfileFolders,
+  resolveDataImportLayout
+} from '../utils/data-import-fs'
+import {
   decryptProfileFromDisk,
   encryptProfileForDisk
 } from '../utils/credentials'
-import { getDefaultProfilesRoot, getProjectRoot, migrateLegacyDataDir } from '../utils/paths'
+import {
+  getDataRoot,
+  getDefaultProfilesRoot,
+  getProjectRoot,
+  migrateLegacyDataDir
+} from '../utils/paths'
 import { isPathInside } from '../utils/path-guard'
 
 interface StoreData {
@@ -77,6 +90,29 @@ export class Database {
     this.data = this.load()
     this.migrateProfilesRootIfNeeded()
     this.ensureProfilesRoot()
+    this.adoptOrphanChromeFolders()
+    this.persistImmediate()
+  }
+
+  private portableDbPath(): string {
+    return join(getDataRoot(), 'chrome-manager-db.json')
+  }
+
+  private readStoreFile(path: string): StoreData | null {
+    if (!existsSync(path)) return null
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as StoreData
+      const profiles = (parsed.profiles ?? []).map((p) =>
+        decryptProfileFromDisk(p as ChromeProfile)
+      )
+      return {
+        profiles,
+        groups: parsed.groups ?? [],
+        settings: { ...defaultSettings(), ...(parsed.settings ?? {}) }
+      }
+    } catch {
+      return null
+    }
   }
 
   /** Chuyển profilesRoot legacy (userData / project root / ổ cũ) → data/chrome-profiles */
@@ -140,36 +176,20 @@ export class Database {
   }
 
   private load(): StoreData {
-    if (!existsSync(this.filePath)) {
-      const initial = this.createEmptyStore()
-      this.persistImmediate(initial)
-      return initial
+    const fromAppData = this.readStoreFile(this.filePath)
+    if (fromAppData && fromAppData.profiles.length > 0) return fromAppData
+
+    const fromPortable = this.readStoreFile(this.portableDbPath())
+    if (fromPortable && fromPortable.profiles.length > 0) {
+      return fromPortable
     }
 
-    try {
-      const raw = readFileSync(this.filePath, 'utf-8')
-      const parsed = JSON.parse(raw) as StoreData
-      const profiles = (parsed.profiles ?? []).map((p) =>
-        decryptProfileFromDisk(p as ChromeProfile)
-      )
-      return {
-        profiles,
-        groups: parsed.groups ?? [],
-        settings: { ...defaultSettings(), ...(parsed.settings ?? {}) }
-      }
-    } catch (error) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const backupPath = `${this.filePath}.corrupt-${stamp}`
-      try {
-        copyFileSync(this.filePath, backupPath)
-        console.error(`[Database] File hỏng — đã backup: ${backupPath}`, error)
-      } catch (backupError) {
-        console.error('[Database] Không thể backup file hỏng', backupError)
-      }
-      const empty = this.createEmptyStore()
-      this.persistImmediate(empty)
-      return empty
-    }
+    if (fromAppData) return fromAppData
+    if (fromPortable) return fromPortable
+
+    const initial = this.createEmptyStore()
+    this.persistImmediate(initial)
+    return initial
   }
 
   private createEmptyStore(): StoreData {
@@ -218,6 +238,26 @@ export class Database {
         // ignore
       }
     }
+    this.writePortableCopy(payload)
+  }
+
+  /** Bản sao trong data/ — copy cả project sang máy khác vẫn còn tên nhóm/hồ sơ. */
+  private writePortableCopy(payload: string): void {
+    try {
+      const portable = this.portableDbPath()
+      const dir = getDataRoot()
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      const tmp = `${portable}.tmp`
+      writeFileSync(tmp, payload, 'utf-8')
+      try {
+        renameSync(tmp, portable)
+      } catch {
+        writeFileSync(portable, payload, 'utf-8')
+        rmSync(tmp, { force: true })
+      }
+    } catch (error) {
+      console.error('[Database] Không ghi được bản portable', error)
+    }
   }
 
   /** Debounce ghi đĩa cho các cập nhật status liên tục. */
@@ -244,6 +284,184 @@ export class Database {
   private ensureProfilesRoot(): void {
     const root = this.data.settings.profilesRoot
     if (!existsSync(root)) mkdirSync(root, { recursive: true })
+  }
+
+  /**
+   * Gắn dataDir đúng thư mục UUID; nếu DB chưa có hồ sơ thì nhận toàn bộ folder.
+   */
+  private adoptOrphanChromeFolders(): boolean {
+    const root = resolve(this.getSettings().profilesRoot)
+    if (!existsSync(root)) return false
+    const folders = listProfileFolders(root)
+    let changed = false
+
+    for (const folderName of folders) {
+      const dir = join(root, folderName)
+      const found = this.data.profiles.find((p) => p.id === folderName)
+      if (found) {
+        const nextDir = resolve(found.dataDir || dir)
+        if (nextDir !== resolve(dir) && !chromeUserDataLooksPopulated(nextDir) && existsSync(dir)) {
+          found.dataDir = dir
+          found.updatedAt = new Date().toISOString()
+          changed = true
+        }
+      }
+    }
+
+    if (this.data.profiles.length > 0) return changed
+
+    let index = 0
+    for (const folderName of folders) {
+      if (this.data.profiles.some((p) => p.id === folderName)) continue
+      index += 1
+      try {
+        this.importProfileRecord({
+          id: folderName,
+          name: `Profile ${String(index).padStart(2, '0')}`,
+          notes: '',
+          groupId: null,
+          userAgent: this.getSettings().defaultUserAgent,
+          proxy: { ...DEFAULT_PROXY },
+          homepage: 'chrome://newtab/',
+          tags: [],
+          gmail: null,
+          autoLoginGmail: false,
+          dataDir: join(root, folderName),
+          ensureEmptyDir: false
+        })
+        changed = true
+      } catch {
+        // ignore
+      }
+    }
+    return changed
+  }
+
+  private copyChromeUserDataDir(
+    sourceDir: string,
+    destDir: string,
+    replace = false
+  ): boolean {
+    const src = resolve(sourceDir)
+    const dst = resolve(destDir)
+    if (src === dst) return true
+    mkdirSync(this.getSettings().profilesRoot, { recursive: true })
+    if (existsSync(dst)) {
+      if (
+        !replace &&
+        chromeUserDataLooksPopulated(dst) &&
+        chromeUserDataLooksPopulated(src)
+      ) {
+        return false
+      }
+      if (replace || !chromeUserDataLooksPopulated(dst)) {
+        try {
+          rmSync(dst, { recursive: true, force: true })
+        } catch (error) {
+          throw new Error(
+            `Không xóa được thư mục ${dst}: ${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+      } else {
+        return true
+      }
+    }
+    this.copyTreeBestEffort(src, dst)
+    return true
+  }
+
+  private copyTreeBestEffort(src: string, dst: string): void {
+    mkdirSync(dst, { recursive: true })
+    if (process.platform === 'win32') {
+      const result = spawnSync(
+        'robocopy',
+        [src, dst, '/E', '/COPY:DAT', '/R:3', '/W:1', '/XJ', '/NFL', '/NDL', '/NJH', '/NJS'],
+        { windowsHide: true, encoding: 'utf8' }
+      )
+      const code = result.status ?? 16
+      // robocopy: 0–7 = thành công (có copy / extra / mismatch)
+      if (code >= 8) {
+        throw new Error(
+          `Không copy được hồ sơ Chrome (mã ${code}). Đóng Chrome đang dùng thư mục nguồn rồi thử lại.`
+        )
+      }
+    } else {
+      const skip = new Set([
+        'SingletonLock',
+        'SingletonSocket',
+        'SingletonCookie',
+        'DevToolsActivePort'
+      ])
+      let copied = 0
+      const walk = (from: string, to: string) => {
+        mkdirSync(to, { recursive: true })
+        let entries
+        try {
+          entries = readdirSync(from, { withFileTypes: true })
+        } catch (error) {
+          throw new Error(
+            `Không đọc được "${from}": ${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+        for (const entry of entries) {
+          if (skip.has(entry.name)) continue
+          const a = join(from, entry.name)
+          const b = join(to, entry.name)
+          try {
+            if (entry.isDirectory()) walk(a, b)
+            else {
+              cpSync(a, b)
+              copied += 1
+            }
+          } catch {
+            // File đang bị Chrome khóa — bỏ qua, copy phần còn lại.
+          }
+        }
+      }
+      walk(src, dst)
+      if (copied === 0) {
+        throw new Error(
+          `Không copy được file nào từ "${src}". Đóng Chrome đang dùng thư mục này rồi thử lại.`
+        )
+      }
+    }
+    this.assertCopiedSession(src, dst)
+  }
+
+  private assertCopiedSession(src: string, dst: string): void {
+    const missing: string[] = []
+    const need = (label: string, rel: string) => {
+      const from = join(src, rel)
+      const to = join(dst, rel)
+      try {
+        if (!existsSync(from) || statSync(from).size < 32) return
+        if (!existsSync(to) || statSync(to).size < 32) missing.push(label)
+      } catch {
+        missing.push(label)
+      }
+    }
+    need('Local State', join('Local State'))
+    need('Preferences', join('Default', 'Preferences'))
+    need('Cookies', join('Default', 'Network', 'Cookies'))
+    if (!existsSync(join(src, 'Default', 'Network', 'Cookies'))) {
+      need('Cookies', join('Default', 'Cookies'))
+    }
+    need('Login Data', join('Default', 'Login Data'))
+    const srcSess = join(src, 'Default', 'Sessions')
+    const dstSess = join(dst, 'Default', 'Sessions')
+    try {
+      const hasSession = (dir: string) =>
+        existsSync(dir) &&
+        readdirSync(dir).some((n) => n.startsWith('Session') || n.startsWith('Tabs'))
+      if (hasSession(srcSess) && !hasSession(dstSess)) missing.push('Sessions')
+    } catch {
+      missing.push('Sessions')
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `Copy thiếu ${[...new Set(missing)].join(', ')}. Đóng Chrome đang mở thư mục nguồn rồi nhập lại.`
+      )
+    }
   }
 
   getSettings(): AppSettings {
@@ -596,94 +814,120 @@ export class Database {
 
   /** Xem trước khi nhập từ thư mục chrome-profiles / data / file db. */
   previewDataImport(selectedPath: string): DataImportPreview {
-    const layout = resolveDataImportLayout(selectedPath)
-    const folders = listProfileFolders(layout.profilesDir)
+    const layout = this.enrichImportLayout(resolveDataImportLayout(selectedPath))
+    const folders = listFoldersForLayout(layout)
     const existingIds = new Set(this.data.profiles.map((p) => p.id))
     const orphanFolderCount = folders.filter((name) => !existingIds.has(name)).length
-    const isLiveDb =
-      Boolean(layout.dbPath) && resolve(layout.dbPath!) === resolve(this.filePath)
-    const sameProfilesRoot = resolve(layout.profilesDir) === resolve(this.getSettings().profilesRoot)
+    const destRoot = resolve(this.getSettings().profilesRoot)
+    const alreadyPresentNames = folders
+      .map((name) => this.data.profiles.find((p) => p.id === name))
+      .filter((p): p is ChromeProfile => {
+        if (!p) return false
+        const dir = p.dataDir ? resolve(p.dataDir) : join(destRoot, p.id)
+        return chromeUserDataLooksPopulated(dir)
+      })
+      .map((p) => p.name)
+    const healCount = this.data.profiles.filter((p) => {
+      const folder = join(layout.profilesDir, p.id)
+      const current = p.dataDir ? resolve(p.dataDir) : ''
+      return (
+        chromeUserDataLooksPopulated(folder) &&
+        (!current || current !== resolve(folder) || !chromeUserDataLooksPopulated(current))
+      )
+    }).length
 
-    let snapshot = null as ReturnType<typeof parseStoreSnapshot>
-    if (layout.dbPath && existsSync(layout.dbPath) && !isLiveDb) {
-      try {
-        snapshot = parseStoreSnapshot(readFileSync(layout.dbPath, 'utf8'))
-      } catch {
-        snapshot = null
-      }
-    }
-    if (isLiveDb || (sameProfilesRoot && !snapshot)) {
-      snapshot = null
-    }
-
-    const mode =
-      snapshot != null ? decideImportMode(snapshot, folders.length) : ('folders' as const)
+    const snapshot = this.readImportSnapshot(layout)
+    const sameRoot = resolve(layout.profilesDir) === destRoot
+    const useSnapshot = Boolean(snapshot && (!sameRoot || this.data.profiles.length === 0))
+    const mode = useSnapshot
+      ? decideImportMode(snapshot, folders.length)
+      : ('folders' as const)
 
     return {
       layout,
       mode,
-      groupCount: snapshot?.groups.length ?? 0,
-      profileCount:
-        snapshot && snapshot.profiles.length > 0
-          ? snapshot.profiles.filter((p) => !existingIds.has(p.id)).length
-          : orphanFolderCount,
+      groupCount: useSnapshot ? (snapshot?.groups.length ?? 0) : 0,
+      profileCount: useSnapshot
+        ? (snapshot?.profiles.filter((p) => !existingIds.has(p.id)).length ?? 0)
+        : orphanFolderCount,
       folderCount: folders.length,
       orphanFolderCount,
-      dbFound: Boolean(layout.dbPath) && !isLiveDb,
-      groupNames: (snapshot?.groups ?? []).map((g) => g.name).slice(0, 8)
+      healCount,
+      alreadyPresentCount: alreadyPresentNames.length,
+      alreadyPresentNames: alreadyPresentNames.slice(0, 8),
+      dbFound: Boolean(layout.dbPath),
+      groupNames: useSnapshot ? (snapshot?.groups ?? []).map((g) => g.name).slice(0, 8) : []
+    }
+  }
+
+  private enrichImportLayout(layout: ReturnType<typeof resolveDataImportLayout>) {
+    if (layout.dbPath && existsSync(layout.dbPath)) return layout
+    const destRoot = resolve(this.getSettings().profilesRoot)
+    const sameTree =
+      resolve(layout.profilesDir) === destRoot ||
+      resolve(layout.root) === resolve(getDataRoot())
+    if (!sameTree) return layout
+    const portable = this.portableDbPath()
+    if (existsSync(portable)) return { ...layout, dbPath: portable }
+    return layout
+  }
+
+  private readImportSnapshot(layout: ReturnType<typeof resolveDataImportLayout>) {
+    const path = layout.dbPath
+    if (!path || !existsSync(path)) return null
+    if (resolve(path) === resolve(this.filePath)) return null
+    try {
+      const snapshot = parseStoreSnapshot(readFileSync(path, 'utf8'))
+      if (!snapshot) return null
+      return {
+        groups: snapshot.groups,
+        profiles: snapshot.profiles.map((p) => decryptProfileFromDisk(p))
+      }
+    } catch {
+      return null
     }
   }
 
   /**
    * Nhập từ thư mục chrome-profiles (kèm chrome-manager-db.json nếu có).
-   * Ưu tiên nhóm+hồ sơ từ DB → chỉ hồ sơ từ DB → quét thư mục UUID.
-   * Giữ session Chrome bằng cách gắn thư mục sẵn có hoặc copy sang profilesRoot.
+   * Gắn / copy session Chrome; hồ sơ đã có thì chữa dataDir trống.
    */
-  importFromDataPath(selectedPath: string): DataImportResult {
-    const layout = resolveDataImportLayout(selectedPath)
+  importFromDataPath(
+    selectedPath: string,
+    options: DataImportOptions = {}
+  ): DataImportResult {
+    const layout = this.enrichImportLayout(resolveDataImportLayout(selectedPath))
     const destRoot = resolve(this.getSettings().profilesRoot)
     const sourceRoot = resolve(layout.profilesDir)
-    const folders = listProfileFolders(layout.profilesDir)
+    const folders = listFoldersForLayout(layout)
     const existingIds = new Set(this.data.profiles.map((p) => p.id))
-    const isLiveDb =
-      Boolean(layout.dbPath) && resolve(layout.dbPath!) === resolve(this.filePath)
-    const sameProfilesRoot = sourceRoot === destRoot
-
-    let snapshot = null as ReturnType<typeof parseStoreSnapshot>
-    if (layout.dbPath && existsSync(layout.dbPath) && !isLiveDb) {
-      try {
-        const raw = readFileSync(layout.dbPath, 'utf8')
-        snapshot = parseStoreSnapshot(raw)
-        if (snapshot) {
-          snapshot = {
-            groups: snapshot.groups,
-            profiles: snapshot.profiles.map((p) => decryptProfileFromDisk(p))
-          }
-        }
-      } catch {
-        snapshot = null
-      }
-    }
-
-    // Cùng máy / cùng chrome-profiles: chỉ nhận thư mục chưa có trong DB
-    if (isLiveDb || (sameProfilesRoot && !snapshot)) {
-      snapshot = null
-    }
-
-    const mode =
-      snapshot != null
-        ? decideImportMode(snapshot, folders.length)
-        : ('folders' as const)
+    const sameRoot = sourceRoot === destRoot
+    const snapshot = this.readImportSnapshot(layout)
+    const useSnapshot = Boolean(snapshot && (!sameRoot || this.data.profiles.length === 0))
+    const mode = useSnapshot
+      ? decideImportMode(snapshot, folders.length)
+      : ('folders' as const)
 
     const skipped: DataImportResult['skipped'] = []
     let groupsCreated = 0
     let profilesCreated = 0
+    let profilesHealed = 0
     let dirsCopied = 0
     let dirsLinked = 0
+    let alreadyPresent = 0
+    const readyNames: string[] = []
     const groupIdMap = new Map<string, string>()
+    const fallbackGroupId = this.resolveImportGroupId(options.groupId)
 
-    if (mode === 'groups' && snapshot) {
+    if (useSnapshot && mode === 'groups' && snapshot) {
       for (const g of snapshot.groups) {
+        const already = this.data.groups.find(
+          (x) => x.id === g.id || x.name.trim().toLowerCase() === g.name.trim().toLowerCase()
+        )
+        if (already) {
+          groupIdMap.set(g.id, already.id)
+          continue
+        }
         try {
           const created = this.createGroup({
             name: g.name,
@@ -702,36 +946,36 @@ export class Database {
       }
     }
 
+    const snapshotProfiles = useSnapshot && snapshot?.profiles.length ? snapshot.profiles : null
     const profilesToImport: Array<Partial<ChromeProfile> & { id: string; name: string }> =
-      snapshot && snapshot.profiles.length > 0
-        ? snapshot.profiles
-        : folders
-            .filter((folderName) => !existingIds.has(folderName))
-            .map((folderName, index) => ({
-              id: folderName,
-              name: `Profile ${String(index + 1).padStart(2, '0')}`,
-              notes: '',
-              groupId: null,
-              userAgent: this.getSettings().defaultUserAgent,
-              proxy: { ...DEFAULT_PROXY },
-              dataDir: join(sourceRoot, folderName),
-              homepage: 'chrome://newtab/',
-              tags: [],
-              gmail: null,
-              autoLoginGmail: false
-            }))
+      snapshotProfiles
+        ? snapshotProfiles
+        : folders.map((folderName, index) => ({
+            id: folderName,
+            name: looksLikeUuid(folderName)
+              ? folderName.slice(0, 8)
+              : `Profile ${String(index + 1).padStart(2, '0')}`,
+            notes: '',
+            groupId: fallbackGroupId,
+            userAgent: this.getSettings().defaultUserAgent,
+            proxy: { ...DEFAULT_PROXY },
+            dataDir: join(sourceRoot, folderName),
+            homepage: 'chrome://newtab/',
+            tags: [],
+            gmail: null,
+            autoLoginGmail: false
+          }))
 
+    const seen = new Set<string>()
     for (const source of profilesToImport) {
+      seen.add(source.id)
       try {
-        if (existingIds.has(source.id)) {
-          skipped.push({ name: source.name, reason: 'Hồ sơ đã có trong danh sách' })
-          continue
-        }
-
         const mappedGroupId =
           source.groupId && groupIdMap.has(source.groupId)
             ? groupIdMap.get(source.groupId)!
-            : null
+            : source.groupId && this.data.groups.some((g) => g.id === source.groupId)
+              ? source.groupId
+              : fallbackGroupId
 
         const candidates = [
           join(sourceRoot, source.id),
@@ -748,6 +992,97 @@ export class Database {
           }) ?? null
 
         const destDir = join(destRoot, source.id)
+        const existing = this.data.profiles.find((p) => p.id === source.id)
+
+        if (existing) {
+          if (sourceDir && chromeUserDataLooksPopulated(sourceDir)) {
+            const current = existing.dataDir ? resolve(existing.dataDir) : ''
+            const attachInPlace = Boolean(layout.onlyFolderNames?.length)
+
+            if (attachInPlace) {
+              existing.dataDir = resolve(sourceDir)
+              existing.updatedAt = new Date().toISOString()
+              if (mappedGroupId && !existing.groupId) existing.groupId = mappedGroupId
+              if (resolve(current) === resolve(sourceDir) && chromeUserDataLooksPopulated(current)) {
+                alreadyPresent += 1
+              } else {
+                profilesHealed += 1
+                dirsLinked += 1
+              }
+              readyNames.push(existing.name)
+              continue
+            }
+
+            const forceReplace =
+              resolve(sourceDir) !== resolve(destDir) &&
+              chromeSessionFingerprint(sourceDir) !==
+                chromeSessionFingerprint(current || destDir)
+
+            if (resolve(sourceDir) === resolve(destDir)) {
+              if (current !== destDir) {
+                existing.dataDir = destDir
+                existing.updatedAt = new Date().toISOString()
+                profilesHealed += 1
+                readyNames.push(existing.name)
+              } else if (!chromeUserDataLooksPopulated(current)) {
+                profilesHealed += 1
+                readyNames.push(existing.name)
+              } else {
+                alreadyPresent += 1
+                readyNames.push(existing.name)
+              }
+            } else if (forceReplace) {
+              if (existing.status === 'running' || existing.status === 'starting') {
+                skipped.push({
+                  name: existing.name,
+                  reason: 'Hồ sơ đang chạy — đóng Chrome rồi nhập lại để ghi đè session'
+                })
+              } else if (this.copyChromeUserDataDir(sourceDir, destDir, true)) {
+                existing.dataDir = destDir
+                existing.updatedAt = new Date().toISOString()
+                profilesHealed += 1
+                dirsCopied += 1
+                readyNames.push(existing.name)
+              }
+            } else if (
+              !current ||
+              !existsSync(current) ||
+              !chromeUserDataLooksPopulated(current)
+            ) {
+              if (this.copyChromeUserDataDir(sourceDir, destDir)) {
+                existing.dataDir = destDir
+                existing.updatedAt = new Date().toISOString()
+                profilesHealed += 1
+                dirsCopied += 1
+                readyNames.push(existing.name)
+              } else if (chromeUserDataLooksPopulated(destDir)) {
+                existing.dataDir = destDir
+                existing.updatedAt = new Date().toISOString()
+                profilesHealed += 1
+                dirsLinked += 1
+                readyNames.push(existing.name)
+              }
+            } else {
+              alreadyPresent += 1
+              readyNames.push(existing.name)
+            }
+
+            if (mappedGroupId && !existing.groupId) {
+              existing.groupId = mappedGroupId
+              existing.updatedAt = new Date().toISOString()
+              profilesHealed += 1
+            }
+          } else {
+            alreadyPresent += 1
+            readyNames.push(existing.name)
+            if (mappedGroupId && !existing.groupId) {
+              existing.groupId = mappedGroupId
+              existing.updatedAt = new Date().toISOString()
+              profilesHealed += 1
+            }
+          }
+          continue
+        }
 
         if (!sourceDir) {
           this.importProfileRecord({
@@ -792,16 +1127,27 @@ export class Database {
             ensureEmptyDir: false
           })
           dirsLinked += 1
+        } else if (layout.onlyFolderNames?.length) {
+          // Gắn đúng thư mục UUID đã chọn — giữ cookie/tab, không copy thiếu file khóa.
+          this.importProfileRecord({
+            id: source.id,
+            name: source.name,
+            notes: source.notes,
+            groupId: mappedGroupId,
+            userAgent: source.userAgent,
+            proxy: source.proxy,
+            homepage: source.homepage,
+            tags: source.tags,
+            gmail: source.gmail ?? null,
+            autoLoginGmail: source.autoLoginGmail,
+            dataDir: resolvedSource,
+            ensureEmptyDir: false
+          })
+          dirsLinked += 1
         } else {
-          mkdirSync(destRoot, { recursive: true })
-          if (existsSync(destDir)) {
-            skipped.push({
-              name: source.name,
-              reason: `Thư mục đích đã tồn tại: ${source.id}`
-            })
-            continue
-          }
-          cpSync(sourceDir, destDir, { recursive: true })
+          const copied = this.copyChromeUserDataDir(sourceDir, destDir)
+          if (copied) dirsCopied += 1
+          else dirsLinked += 1
           this.importProfileRecord({
             id: source.id,
             name: source.name,
@@ -816,15 +1162,47 @@ export class Database {
             dataDir: destDir,
             ensureEmptyDir: false
           })
-          dirsCopied += 1
         }
 
         existingIds.add(source.id)
         profilesCreated += 1
+        readyNames.push(source.name)
       } catch (error) {
         skipped.push({
           name: source.name || source.id,
           reason: error instanceof Error ? error.message : 'Không nhập được hồ sơ'
+        })
+      }
+    }
+
+    // Snapshot không liệt kê hết folder UUID → vẫn gắn thư mục mồ côi
+    for (const folderName of folders) {
+      if (seen.has(folderName) || existingIds.has(folderName)) continue
+      try {
+        this.importProfileRecord({
+          id: folderName,
+          name: looksLikeUuid(folderName)
+            ? folderName.slice(0, 8)
+            : `Profile ${String(this.data.profiles.length + 1).padStart(2, '0')}`,
+          notes: '',
+          groupId: fallbackGroupId,
+          userAgent: this.getSettings().defaultUserAgent,
+          proxy: { ...DEFAULT_PROXY },
+          homepage: 'chrome://newtab/',
+          tags: [],
+          gmail: null,
+          autoLoginGmail: false,
+          dataDir: join(sourceRoot, folderName),
+          ensureEmptyDir: false
+        })
+        existingIds.add(folderName)
+        profilesCreated += 1
+        dirsLinked += 1
+        readyNames.push(looksLikeUuid(folderName) ? folderName.slice(0, 8) : folderName)
+      } catch (error) {
+        skipped.push({
+          name: folderName,
+          reason: error instanceof Error ? error.message : 'Không gắn được thư mục'
         })
       }
     }
@@ -835,10 +1213,19 @@ export class Database {
       mode,
       groupsCreated,
       profilesCreated,
+      profilesHealed,
       dirsCopied,
       dirsLinked,
+      alreadyPresent,
+      readyNames: [...new Set(readyNames)],
       skipped
     }
+  }
+
+  private resolveImportGroupId(groupId?: string | null): string | null {
+    const id = groupId?.trim() ?? ''
+    if (!id || id === 'all' || id === 'ungrouped') return null
+    return this.data.groups.some((g) => g.id === id) ? id : null
   }
 
   /** Ghi hồ sơ đã có dataDir (không tạo thư mục mới trừ khi yêu cầu). */

@@ -41,6 +41,8 @@ function applyFilters(profiles: ChromeProfile[], filters?: ProfileFilters): Chro
         p.name.toLowerCase().includes(search) ||
         p.notes.toLowerCase().includes(search) ||
         p.tags.some((t) => t.toLowerCase().includes(search)) ||
+        p.id.toLowerCase().includes(search) ||
+        (p.dataDir ?? '').toLowerCase().includes(search) ||
         (p.gmail?.email ?? '').toLowerCase().includes(search)
     )
   }
@@ -341,7 +343,7 @@ export function registerIpcHandlers(): void {
     const { dialog, BrowserWindow } = await import('electron')
     const win = BrowserWindow.getFocusedWindow()
     const opts = {
-      title: 'Chọn thư mục chrome-profiles hoặc data',
+      title: 'Chọn thư mục hồ sơ Chrome (UUID, chrome-profiles, hoặc data)',
       properties: ['openDirectory'] as ('openDirectory')[]
     }
     const result = win
@@ -355,8 +357,8 @@ export function registerIpcHandlers(): void {
     db.previewDataImport(typeof selectedPath === 'string' ? selectedPath : '')
   )
 
-  ipcMain.handle(IPC.DATA_IMPORT, (_e, selectedPath: string) =>
-    db.importFromDataPath(typeof selectedPath === 'string' ? selectedPath : '')
+  ipcMain.handle(IPC.DATA_IMPORT, (_e, selectedPath: string, options?: { groupId?: string | null }) =>
+    db.importFromDataPath(typeof selectedPath === 'string' ? selectedPath : '', options ?? {})
   )
 
   ipcMain.handle(IPC.DASHBOARD_STATS, (): DashboardStats => {

@@ -106,8 +106,10 @@ const api = {
     pickDataPath: (): Promise<string | null> => ipcRenderer.invoke(IPC.DIALOG_OPEN_DATA_DIR),
     previewDataImport: (selectedPath: string): Promise<DataImportPreview> =>
       ipcRenderer.invoke(IPC.DATA_IMPORT_PREVIEW, selectedPath),
-    importDataPath: (selectedPath: string): Promise<DataImportResult> =>
-      ipcRenderer.invoke(IPC.DATA_IMPORT, selectedPath)
+    importDataPath: (
+      selectedPath: string,
+      options?: { groupId?: string | null }
+    ): Promise<DataImportResult> => ipcRenderer.invoke(IPC.DATA_IMPORT, selectedPath, options)
   },
   dashboard: {
     stats: (): Promise<DashboardStats> => ipcRenderer.invoke(IPC.DASHBOARD_STATS)

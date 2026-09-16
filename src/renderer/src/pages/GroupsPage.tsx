@@ -11,7 +11,7 @@ import {
   parseImportGroupsJson,
   summarizeImportPayload
 } from '@shared/group-import'
-import type { DataImportPreview } from '@shared/data-import'
+import { summarizeDataImport, type DataImportPreview } from '@shared/data-import'
 import {
   DEFAULT_PROFILE_PREFIX,
   formatDate,
@@ -170,18 +170,11 @@ export function GroupsPage(): JSX.Element {
     setImporting(true)
     try {
       const result = await importDataPath(dataPath)
-      const modeLabel =
-        result.mode === 'groups'
-          ? 'nhóm + hồ sơ'
-          : result.mode === 'profiles'
-            ? 'hồ sơ (kèm metadata)'
-            : 'thư mục Chrome'
-      const skipNote =
-        result.skipped.length > 0 ? ` Bỏ qua/cảnh báo: ${result.skipped.length}.` : ''
+      const summary = summarizeDataImport(result)
       toast({
-        tone: result.profilesCreated > 0 || result.groupsCreated > 0 ? 'success' : 'warning',
-        title: `Đã nhập ${modeLabel}`,
-        description: `Nhóm ${result.groupsCreated}, hồ sơ ${result.profilesCreated}, gắn sẵn ${result.dirsLinked}, copy ${result.dirsCopied}.${skipNote}`
+        tone: summary.tone,
+        title: summary.title,
+        description: summary.description
       })
       setImportOpen(false)
     } catch (error) {
@@ -552,7 +545,7 @@ export function GroupsPage(): JSX.Element {
               className={importTab === 'folder' ? 'btn-primary' : 'btn-secondary'}
               onClick={() => setImportTab('folder')}
             >
-              Thư mục chrome-profiles
+              Thư mục hồ sơ
             </button>
             <button
               type="button"
@@ -566,11 +559,13 @@ export function GroupsPage(): JSX.Element {
           {importTab === 'folder' ? (
             <div className="space-y-4">
               <p className="text-sm text-ink-muted">
-                Chọn thư mục <span className="font-medium text-ink-soft">chrome-profiles</span> hoặc{' '}
-                <span className="font-medium text-ink-soft">data</span> (có thể kèm{' '}
-                <span className="font-medium text-ink-soft">chrome-manager-db.json</span> cạnh đó). Có
-                DB thì nhập nhóm + hồ sơ (giữ session); không có nhóm thì nhập hồ sơ; chỉ còn thư mục
-                UUID thì gắn thành hồ sơ.
+                Chọn một thư mục UUID (ví dụ{' '}
+                <span className="font-mono text-ink-soft">E:\0dde16d0-…</span>) để gắn đúng hồ sơ đó —
+                giữ Gmail và tab đang có. Chọn cả{' '}
+                <span className="font-medium text-ink-soft">chrome-profiles</span> /{' '}
+                <span className="font-medium text-ink-soft">data</span> khi chuyển máy (sẽ copy session).
+                Đóng Chrome đang mở thư mục nguồn trước khi nhập. JSON thuần chỉ mang tên, không mang
+                session.
               </p>
               <button type="button" className="btn-secondary" onClick={() => void onPickDataFolder()}>
                 Chọn thư mục…
@@ -598,8 +593,17 @@ export function GroupsPage(): JSX.Element {
                   <div className="mt-1 text-xs text-ink-muted">
                     DB: {dataPreview.dbFound ? 'có' : 'không'} · Nhóm mới ~{dataPreview.groupCount} ·
                     Hồ sơ mới ~{dataPreview.profileCount} · Thư mục {dataPreview.folderCount} (mồ côi{' '}
-                    {dataPreview.orphanFolderCount})
+                    {dataPreview.orphanFolderCount}, chữa {dataPreview.healCount}, có sẵn{' '}
+                    {dataPreview.alreadyPresentCount})
                   </div>
+                  {dataPreview.alreadyPresentNames.length > 0 && (
+                    <div className="mt-1 text-xs text-ink-muted">
+                      Đã có: {dataPreview.alreadyPresentNames.join(' · ')}
+                      {dataPreview.alreadyPresentCount > dataPreview.alreadyPresentNames.length
+                        ? ' …'
+                        : ''}
+                    </div>
+                  )}
                   {dataPreview.groupNames.length > 0 && (
                     <div className="mt-1 text-xs text-ink-muted">
                       {dataPreview.groupNames.join(' · ')}
@@ -615,7 +619,16 @@ export function GroupsPage(): JSX.Element {
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={importing || !dataPreview || dataPreview.profileCount + dataPreview.groupCount === 0}
+                  disabled={
+                    importing ||
+                    !dataPreview ||
+                    dataPreview.folderCount +
+                      dataPreview.profileCount +
+                      dataPreview.groupCount +
+                      dataPreview.healCount +
+                      dataPreview.alreadyPresentCount ===
+                      0
+                  }
                   onClick={() => void onImportDataFolder()}
                 >
                   {importing ? 'Đang nhập...' : 'Nhập từ thư mục'}

@@ -68,7 +68,10 @@ export interface AppApi {
     saveExportFile: (content: string, defaultName?: string) => Promise<string | null>
     pickDataPath: () => Promise<string | null>
     previewDataImport: (selectedPath: string) => Promise<DataImportPreview>
-    importDataPath: (selectedPath: string) => Promise<DataImportResult>
+    importDataPath: (
+      selectedPath: string,
+      options?: { groupId?: string | null }
+    ) => Promise<DataImportResult>
   }
   dashboard: {
     stats: () => Promise<DashboardStats>

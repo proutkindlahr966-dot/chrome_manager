@@ -31,6 +31,7 @@ import { Modal } from '@/components/ui/Modal'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { useAppStore } from '@/stores/app-store'
 import { askConfirm, toast } from '@/stores/ui-store'
+import { summarizeDataImport } from '@shared/data-import'
 import type { BulkResult, ChromeProfile } from '@shared/types'
 
 export function ProfilesPage(): JSX.Element {
@@ -300,24 +301,41 @@ export function ProfilesPage(): JSX.Element {
       const selected = await window.api.groups.pickDataPath()
       if (!selected) return
       const preview = await window.api.groups.previewDataImport(selected)
+      const alreadyNote =
+        preview.alreadyPresentCount > 0
+          ? ` Đã có sẵn: ${preview.alreadyPresentNames.join(', ') || `${preview.alreadyPresentCount} hồ sơ`} (sẽ hiện trong danh sách, không tạo bản mới).`
+          : ''
       const ok = await askConfirm({
-        title: 'Nhập từ thư mục chrome-profiles?',
+        title: 'Nhập hồ sơ Chrome từ thư mục?',
         description:
-          preview.mode === 'groups'
+          (preview.mode === 'groups'
             ? `Sẽ nhập ~${preview.groupCount} nhóm và ~${preview.profileCount} hồ sơ (giữ session Chrome nếu có thư mục).`
             : preview.mode === 'profiles'
               ? `Không có nhóm hợp lệ — sẽ nhập ~${preview.profileCount} hồ sơ.`
-              : `Sẽ gắn ~${preview.profileCount} thư mục Chrome thành hồ sơ (chưa có trong danh sách).`,
-        confirmLabel: 'Nhập'
+              : `Sẽ nhập ${preview.folderCount} thư mục Chrome (mới ${preview.orphanFolderCount}, chữa ${preview.healCount}).`) +
+          alreadyNote,
+        confirmLabel: preview.alreadyPresentCount > 0 && preview.orphanFolderCount === 0 ? 'Mở hồ sơ' : 'Nhập'
       })
       if (!ok) return
       setImportingData(true)
-      const result = await importDataPath(selected)
+      const groupId =
+        filters.groupId && filters.groupId !== 'all' && filters.groupId !== 'ungrouped'
+          ? filters.groupId
+          : null
+      const result = await importDataPath(selected, { groupId })
+      const summary = summarizeDataImport(result)
       toast({
-        tone: result.profilesCreated > 0 || result.groupsCreated > 0 ? 'success' : 'warning',
-        title: 'Đã nhập dữ liệu',
-        description: `Nhóm ${result.groupsCreated}, hồ sơ ${result.profilesCreated}, gắn ${result.dirsLinked}, copy ${result.dirsCopied}.`
+        tone: summary.tone,
+        title: summary.title,
+        description: summary.description
       })
+      const focus = result.readyNames[0]
+      if (focus) {
+        setSearchInput(focus)
+        setFilters({
+          groupId: groupId ?? 'ungrouped'
+        })
+      }
     } catch (error) {
       toast({
         tone: 'error',
@@ -362,7 +380,7 @@ export function ProfilesPage(): JSX.Element {
             />
             <input
               className="input pl-9"
-              placeholder="Tìm theo tên, ghi chú, tag, gmail..."
+              placeholder="Tìm theo tên, UUID, ghi chú, tag, gmail..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
             />

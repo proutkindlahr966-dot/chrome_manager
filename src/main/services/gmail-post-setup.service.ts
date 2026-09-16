@@ -619,6 +619,184 @@ async function clearPublishBlockers(page: Page): Promise<string[]> {
   return cleared
 }
 
+/**
+ * Cửa sổ chia ô: Published options không hiện "Copy responder link" / Shorten URL
+ * — chỉ còn icon chuỗi góc dưới trái (XuQwKc / GmuOkf / foqfDc). Bấm icon đó
+ * thì mở popover Copy responder link.
+ */
+async function clickPublishedOptionsLinkIcon(page: Page): Promise<boolean> {
+  await installViewportHelpers(page)
+  for (const frame of framesOf(page)) {
+    const point = await frame
+      .evaluate(() => {
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 6 && r.height > 6
+        }
+        const norm = (s: string | null): string =>
+          (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        const dialogs = (
+          Array.from(
+            document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+          ) as HTMLElement[]
+        ).filter((d) => {
+          if (!vis(d)) return false
+          const t = (d.innerText || '').toLowerCase()
+          return (
+            t.includes('published options') ||
+            (t.includes('accepting responses') && t.includes('responders')) ||
+            (t.includes('anyone with the link') && t.includes('responders'))
+          )
+        })
+        if (!dialogs.length) return null
+
+        const reveal = (el: HTMLElement): void => {
+          const w = window as Window & { __cmReveal?: (el: HTMLElement) => boolean }
+          if (typeof w.__cmReveal === 'function') w.__cmReveal(el)
+          else {
+            try {
+              el.scrollIntoView({ block: 'center', inline: 'nearest' })
+            } catch {
+              // ignore
+            }
+          }
+        }
+        const clickableOf = (el: HTMLElement): HTMLElement => {
+          const host =
+            (el.closest(
+              'button, [role="button"], [role="link"], [jsaction], [tabindex]'
+            ) as HTMLElement | null) || el
+          return vis(host) ? host : el
+        }
+        const pointOf = (el: HTMLElement): { x: number; y: number } | null => {
+          reveal(el)
+          const r = el.getBoundingClientRect()
+          if (r.width < 6 || r.height < 6) return null
+          if (r.bottom < 0 || r.top > window.innerHeight) return null
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+        }
+        const isCancelOrSave = (el: HTMLElement): boolean => {
+          const t = norm(el.innerText || el.getAttribute('aria-label'))
+          return ['cancel', 'huỷ', 'hủy', 'save', 'lưu'].includes(t)
+        }
+
+        for (const d of dialogs) {
+          const byClass = Array.from(
+            d.querySelectorAll('.XuQwKc, .GmuOkf, .foqfDc, .gdyQ3c')
+          ) as HTMLElement[]
+          for (const el of byClass) {
+            if (!vis(el)) continue
+            const hit = clickableOf(el)
+            if (isCancelOrSave(hit)) continue
+            const p = pointOf(hit)
+            if (p) return p
+          }
+
+          const byAria = (
+            Array.from(
+              d.querySelectorAll(
+                'button, [role="button"], [role="link"], [aria-label], [data-tooltip]'
+              )
+            ) as HTMLElement[]
+          ).find((el) => {
+            if (!vis(el) || isCancelOrSave(el)) return false
+            const lab = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('data-tooltip') || ''} ${el.getAttribute('title') || ''}`
+            return /copy responder|copy link|get link|share|chia sẻ|liên kết|responder link/i.test(
+              lab
+            )
+          })
+          if (byAria) {
+            const p = pointOf(clickableOf(byAria))
+            if (p) return p
+          }
+
+          // Cùng hàng Cancel | Save: nút icon bên trái (không chữ)
+          const footerBtns = (
+            Array.from(
+              d.querySelectorAll('button, [role="button"], .XuQwKc')
+            ) as HTMLElement[]
+          ).filter((el) => vis(el) && !isCancelOrSave(el))
+          const cancel = (
+            Array.from(d.querySelectorAll('button, [role="button"]')) as HTMLElement[]
+          ).find((el) => vis(el) && ['cancel', 'huỷ', 'hủy'].includes(norm(el.innerText)))
+          if (cancel) {
+            const cr = cancel.getBoundingClientRect()
+            const leftOfCancel = footerBtns
+              .map((el) => ({ el, r: el.getBoundingClientRect() }))
+              .filter(
+                ({ r }) =>
+                  r.right < cr.left - 4 &&
+                  Math.abs(r.top + r.height / 2 - (cr.top + cr.height / 2)) < 28
+              )
+              .sort((a, b) => a.r.left - b.r.left)
+            if (leftOfCancel[0]) {
+              const p = pointOf(clickableOf(leftOfCancel[0].el))
+              if (p) return p
+            }
+          }
+        }
+        return null
+      })
+      .catch(() => null)
+    if (!point) continue
+    const abs = await framePointToPage(page, frame, point)
+    if (await mouseClickPoint(page, abs)) return true
+    const viaDom = await frame
+      .evaluate(() => {
+        const vis = (el: HTMLElement): boolean => {
+          const s = window.getComputedStyle(el)
+          if (s.display === 'none' || s.visibility === 'hidden') return false
+          const r = el.getBoundingClientRect()
+          return r.width > 6 && r.height > 6
+        }
+        const dialogs = (
+          Array.from(
+            document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+          ) as HTMLElement[]
+        ).filter((d) => vis(d) && /published options|anyone with the link/i.test(d.innerText || ''))
+        const fire = (el: HTMLElement): boolean => {
+          const host =
+            (el.closest('button, [role="button"], [role="link"], [jsaction]') as HTMLElement | null) ||
+            el
+          host.dispatchEvent(
+            new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 })
+          )
+          host.dispatchEvent(
+            new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 })
+          )
+          host.click()
+          return true
+        }
+        for (const d of dialogs) {
+          const el = d.querySelector('.XuQwKc, .foqfDc, .GmuOkf') as HTMLElement | null
+          if (el && vis(el)) return fire(el)
+        }
+        return false
+      })
+      .catch(() => false)
+    if (viaDom) return true
+  }
+  return false
+}
+
+/** Published options đang mở → bấm icon chuỗi (nếu có) rồi chờ popover Copy. */
+async function tryOpenCopyPanelFromPublishedOptions(page: Page): Promise<boolean> {
+  if (await hasCopyResponderLinkDialog(page)) return true
+  if (!(await hasPublishedOptionsDialog(page))) return false
+  await page.bringToFront().catch(() => undefined)
+  await revealResponderCopySection(page)
+  if (await hasCopyResponderLinkDialog(page)) return true
+  if (!(await clickPublishedOptionsLinkIcon(page))) return false
+  const started = Date.now()
+  while (Date.now() - started < 3500) {
+    await delay(250)
+    if (await hasCopyResponderLinkDialog(page)) return true
+  }
+  return hasCopyResponderLinkDialog(page)
+}
+
 /** Dialog Published options đang mở (chứa Copy khi lăn xuống). */
 async function hasPublishedOptionsDialog(page: Page): Promise<boolean> {
   for (const frame of framesOf(page)) {
@@ -639,7 +817,8 @@ async function hasPublishedOptionsDialog(page: Page): Promise<boolean> {
           const t = (d.innerText || '').toLowerCase()
           return (
             t.includes('published options') ||
-            (t.includes('accepting responses') && t.includes('responders'))
+            (t.includes('accepting responses') && t.includes('responders')) ||
+            (t.includes('anyone with the link') && t.includes('responders'))
           )
         })
       })
@@ -656,6 +835,8 @@ async function hasPublishedOptionsDialog(page: Page): Promise<boolean> {
 async function dismissPublishedOptionsWithoutCopy(page: Page): Promise<boolean> {
   await revealResponderCopySection(page)
   if (await hasCopyResponderLinkDialog(page)) return false
+  // Cửa sổ nhỏ: Copy nằm sau icon chuỗi — bấm trước khi Cancel
+  if (await tryOpenCopyPanelFromPublishedOptions(page)) return false
   if (!(await hasPublishedOptionsDialog(page))) return false
 
   for (const frame of framesOf(page)) {
@@ -857,10 +1038,12 @@ async function dumpFormDialogs(page: Page): Promise<string> {
               .filter(Boolean)
           )
         ]
-        if (!dialogs.length && !btns.length) return ''
+        const xu = document.querySelectorAll('.XuQwKc, .foqfDc').length
+        if (!dialogs.length && !btns.length && xu === 0) return ''
         return [
           `vp=${window.innerWidth}x${window.innerHeight}`,
           ...dialogs,
+          xu ? `iconLink=${xu}` : '',
           btns.length ? `nút[${btns.join(',')}]` : ''
         ]
           .filter(Boolean)
@@ -923,15 +1106,17 @@ async function openCopyResponderPanel(page: Page): Promise<boolean> {
   await revealResponderCopySection(page)
   if (await hasCopyResponderLinkDialog(page)) return true
 
-  // Dialog Published options đã mở sau Publish — thử lăn xuống phần Copy trước
+  // Dialog Published options: lăn Copy, hoặc bấm icon chuỗi (UI chia ô)
   if (await hasPublishedOptionsDialog(page)) {
     for (let i = 0; i < 3; i++) {
       await revealResponderCopySection(page)
       await delay(350)
       if (await hasCopyResponderLinkDialog(page)) return true
+      if (await tryOpenCopyPanelFromPublishedOptions(page)) return true
     }
-    // Không có Shorten/Copy trong dialog này → Cancel rồi mở đúng popover
+    // Không có Shorten/Copy / icon chuỗi → Cancel rồi mở đúng popover
     await dismissPublishedOptionsWithoutCopy(page)
+    if (await hasCopyResponderLinkDialog(page)) return true
   }
 
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -940,7 +1125,9 @@ async function openCopyResponderPanel(page: Page): Promise<boolean> {
     if (await hasPublishedOptionsDialog(page)) {
       await revealResponderCopySection(page)
       if (await hasCopyResponderLinkDialog(page)) return true
+      if (await tryOpenCopyPanelFromPublishedOptions(page)) return true
       await dismissPublishedOptionsWithoutCopy(page)
+      if (await hasCopyResponderLinkDialog(page)) return true
     }
 
     // Ưu tiên mục/menu "Copy responder link" trước khi bấm chip (chip dễ mở Published options)
@@ -959,7 +1146,9 @@ async function openCopyResponderPanel(page: Page): Promise<boolean> {
       await revealResponderCopySection(page)
       if (await hasCopyResponderLinkDialog(page)) return true
       if (await hasPublishedOptionsDialog(page)) {
+        if (await tryOpenCopyPanelFromPublishedOptions(page)) return true
         await dismissPublishedOptionsWithoutCopy(page)
+        if (await hasCopyResponderLinkDialog(page)) return true
         if (await clickCopyResponderMenuItem(page)) {
           await delay(700)
           await revealResponderCopySection(page)
@@ -1161,8 +1350,10 @@ async function extractLinkFromCopyResponderDialogUnlocked(
         if (await hasPublishedOptionsDialog(page)) {
           await revealResponderCopySection(page)
           if (!(await hasCopyResponderLinkDialog(page))) {
-            await dismissPublishedOptionsWithoutCopy(page)
-            await openCopyResponderPanel(page)
+            if (!(await tryOpenCopyPanelFromPublishedOptions(page))) {
+              await dismissPublishedOptionsWithoutCopy(page)
+              await openCopyResponderPanel(page)
+            }
           }
         } else {
           await openCopyResponderPanel(page)
@@ -1670,8 +1861,13 @@ async function publishFormViaToolbarDialog(page: Page, diag: string[]): Promise<
       if (await hasPublishedOptionsDialog(page)) {
         await revealResponderCopySection(page)
         if (await hasCopyResponderLinkDialog(page)) return 'ok'
-        // Dialog cài đặt không có Copy → đóng rồi mở đúng mục menu
+        if (await tryOpenCopyPanelFromPublishedOptions(page)) {
+          diag.push('icon chuỗi Copy responder link')
+          return 'ok'
+        }
+        // Dialog cài đặt không có Copy / icon chuỗi → đóng rồi mở đúng mục menu
         await dismissPublishedOptionsWithoutCopy(page)
+        if (await hasCopyResponderLinkDialog(page)) return 'ok'
       }
 
       // Nút/mục "Copy responder link" nếu có sẵn — bấm chip lại dễ mở lại đầu dialog
@@ -1695,7 +1891,9 @@ async function publishFormViaToolbarDialog(page: Page, diag: string[]): Promise<
       await revealResponderCopySection(page)
       if (await hasCopyResponderLinkDialog(page)) return 'ok'
       if (await hasPublishedOptionsDialog(page)) {
+        if (await tryOpenCopyPanelFromPublishedOptions(page)) return 'ok'
         await dismissPublishedOptionsWithoutCopy(page)
+        if (await hasCopyResponderLinkDialog(page)) return 'ok'
       }
 
       if (!(await hasPublishedOptionsDialog(page))) {
@@ -1768,6 +1966,7 @@ async function publishFormViaToolbarDialog(page: Page, diag: string[]): Promise<
     if (await hasPublishedOptionsDialog(page)) {
       await revealResponderCopySection(page)
       if (await hasCopyResponderLinkDialog(page)) return 'ok'
+      if (await tryOpenCopyPanelFromPublishedOptions(page)) return 'ok'
       await dismissPublishedOptionsWithoutCopy(page)
       continue
     }
@@ -1780,6 +1979,7 @@ async function publishFormViaToolbarDialog(page: Page, diag: string[]): Promise<
       await revealResponderCopySection(page)
       if (await hasCopyResponderLinkDialog(page)) return 'ok'
       if (await hasPublishedOptionsDialog(page)) {
+        if (await tryOpenCopyPanelFromPublishedOptions(page)) return 'ok'
         await dismissPublishedOptionsWithoutCopy(page)
       }
     }
